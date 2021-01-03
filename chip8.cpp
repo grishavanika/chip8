@@ -1,479 +1,31 @@
-#include <variant>
-#include <tuple>
 #include <algorithm>
 #include <numeric>
 #include <random>
 #include <span>
 
-#include <cstdint>
 #include <cstddef>
+
+#include "code_edsl.h"
+
+#include <SDL2/SDL.h>
 
 #if defined(NDEBUG)
 #  undef NDEBUG
 #endif
 #include <cassert>
 
-#if (__EMSCRIPTEN__)
-# define X_HAS_CONCEPTS() 0
-#else
-# define X_HAS_CONCEPTS() 1
-#endif
+using namespace edsl;
 
-#if (X_HAS_CONCEPTS())
-#  include <concepts>
-#endif
-
-#include <SDL2/SDL.h>
-
-static_assert(CHAR_BIT == 8);
-
-template<int Tag_>
-struct byte_placeholder : std::integral_constant<int, Tag_> {};
-
-constexpr byte_placeholder<-1> _;
-constexpr byte_placeholder<0> _n;
-constexpr byte_placeholder<1> _x;
-constexpr byte_placeholder<2> _y;
-constexpr byte_placeholder<3> _k;
-
-template<typename P>
-struct is_placeholder : std::false_type {};
-
-template<int I>
-struct is_placeholder<byte_placeholder<I>> : std::true_type {};
-
-template<typename P>
-constexpr bool is_placeholder_v = is_placeholder<P>::value;
-
-template<typename BinOp, typename Init, typename Tuple>
-struct reduce;
-
-template<typename BinOp, typename Init>
-struct reduce<BinOp, Init, std::tuple<>> { using type = Init; };
-
-template<typename BinOp, typename Init, typename A, typename... Args>
-struct reduce<BinOp, Init, std::tuple<A, Args...>>
-    : reduce<BinOp
-        , decltype(std::declval<BinOp>()(std::declval<Init>(), std::declval<A>()))
-        , std::tuple<Args...>> {};
-
-template<typename BinOp, typename Init, typename Tuple>
-using reduce_t = typename reduce<BinOp, Init, Tuple>::type;
-
-template<std::uint16_t BitsCount>
-struct ValueType;
-
-template<> struct ValueType<4>
-{
-    using type = std::uint8_t;
-    static constexpr std::uint16_t mask = 0x000f;
-};
-template<> struct ValueType<8>
-{
-    using type = std::uint8_t;
-    static constexpr std::uint16_t mask = 0x00ff;
-};
-template<> struct ValueType<12>
-{
-    using type = std::uint16_t;
-    static constexpr std::uint16_t mask = 0x0fff;
-};
-template<> struct ValueType<16>
-{
-    using type = std::uint16_t;
-    static constexpr std::uint16_t mask = 0xffff;
-};
-
-template<unsigned I_, std::uint16_t BitsCount_, typename Tag_>
-struct Value
-{
-    static_assert(I_ < 4);
-    static_assert(BitsCount_ > 0);
-    static_assert((BitsCount_ % 4) == 0);
-    static_assert((BitsCount_ / 8) <= 2);
-
-    using Tag = Tag_;
-    static constexpr unsigned I = I_;
-    static constexpr unsigned BitsCount = BitsCount_;
-    using type = typename ValueType<BitsCount>::type;
-
-    constexpr type fetch(std::uint16_t v) const
-    {
-        constexpr std::uint16_t shift = ((4 - I) * 4 - BitsCount_);
-        constexpr std::uint16_t mask = (ValueType<BitsCount>::mask << shift);
-        return type((v & mask) >> shift);
-    }
-};
-
-template<typename ValueTuple>
-struct as_parameters_tuple;
-
-template<typename... Vs>
-struct as_parameters_tuple<std::tuple<Vs...>>
-{
-    using type = std::tuple<typename Vs::type...>;
-};
-
-template<typename ValueTuple>
-using as_parameters_tuple_t = typename as_parameters_tuple<ValueTuple>::type;
-
-template<typename ValueTuple>
-constexpr auto as_arguments_tuple(std::uint16_t value)
-{
-    using Size = std::tuple_size<ValueTuple>;
-    return [value]<std::size_t... Is>(std::index_sequence<Is...>)
-    {
-        using R = as_parameters_tuple_t<ValueTuple>;
-        const ValueTuple vs;
-        return R(std::get<Size::value - Is - 1>(vs).fetch(value)...);
-    }(std::make_index_sequence<Size::value>());
-}
-
-template<unsigned I, typename Tag>
-using default_tuple = std::tuple<Value<I, 4, Tag>>;
-
-template<typename V1, typename V2>
-constexpr auto add_same()
-{
-    static_assert(std::is_same_v<typename V1::Tag, typename V2::Tag>);
-    return Value<V1::I, V1::BitsCount + V2::BitsCount, typename V1::Tag>();
-}
-
-template<typename V1, typename V2>
-using add_same_t = decltype(add_same<V1, V2>());
-
-template<typename T, typename V, typename... Ps>
-struct replace_last_in_tuple;
-
-template<typename T1, typename V, typename... Ps>
-struct replace_last_in_tuple<std::tuple<T1>, V, Ps...>
-{
-    using type = std::tuple<Ps..., V>;
-};
-
-template<typename T0, typename... Ts, typename V, typename... Ps>
-struct replace_last_in_tuple<std::tuple<T0, Ts...>, V, Ps...>
-    : replace_last_in_tuple<std::tuple<Ts...>, V, Ps..., T0>
-{
-};
-
-template<typename T, typename V>
-using replace_last_in_tuple_t = typename replace_last_in_tuple<T, V>::type;
-
-template<typename F, typename Tuple, typename... Ps>
-struct filter;
-
-template<typename F, typename... Ps>
-struct filter<F, std::tuple<>, Ps...>
-{
-    using type = std::tuple<Ps...>;
-};
-
-template<typename F, typename A, typename... Ts, typename... Ps>
-struct filter<F, std::tuple<A, Ts...>, Ps...>
-{
-    using Ok = decltype(std::declval<F>()(std::declval<A>()));
-    using type = std::conditional_t<Ok::value
-        , typename filter<F, std::tuple<Ts...>, A, Ps...>::type
-        , typename filter<F, std::tuple<Ts...>, Ps...>::type>;
-};
-
-template<typename F, typename Tuple, typename... Ps>
-using filter_t = typename filter<F, Tuple, Ps...>::type;
-
-template<int>
-struct tag_int {};
-
-template<typename P>
-struct is_tag_int : std::false_type {};
-
-template<int I>
-struct is_tag_int<tag_int<I>> : std::true_type {};
-
-template<typename P>
-constexpr bool is_tag_int_v = is_tag_int<P>::value;
-
-template<unsigned Index, typename P>
-using select_type_t = std::conditional_t<
-      std::is_integral_v<P>
-    , tag_int<Index>
-    , P>;
-
-template<typename P1, typename P2, typename P3, typename P4>
-struct Match
-{
-    template<typename P>
-    using Or_ = std::variant<P, std::uint8_t>;
-    
-    using Opcode_ = std::tuple<
-        Or_<P1>, Or_<P2>, Or_<P3>, Or_<P4>>;
-    
-    Opcode_ opcode_;
-    
-    static constexpr auto do_()
-    {
-        auto reduce_op = []<typename ReduceTuple, typename Rhs>(ReduceTuple lhs, Rhs)
-        {
-            if constexpr (std::tuple_size_v<ReduceTuple> == 0)
-            {
-                return default_tuple<0, Rhs>();
-            }
-            else
-            {
-                using Last = std::tuple_element_t<std::tuple_size_v<ReduceTuple> -1, ReduceTuple>;
-                using Prev = typename Last::Tag;
-                if constexpr (std::is_same_v<Prev, Rhs>)
-                {
-                    return replace_last_in_tuple_t<ReduceTuple
-                        , add_same_t<Last, Value<Last::I + 1, 4, Rhs>>>();
-                }
-                else
-                {
-                    return std::tuple_cat(lhs, default_tuple<
-                        Last::I + Last::BitsCount / 4, Rhs>());
-                }
-            }
-        };
-
-        auto filter_op = []<typename T>(T)
-        {
-            using Tag = typename T::Tag;
-            if constexpr (is_placeholder_v<Tag>)
-            {
-                if constexpr (Tag::value < 0) // _
-                {
-                    return std::false_type();
-                }
-                else
-                {
-                    return std::true_type();
-                }
-            }
-            else if constexpr (is_tag_int_v<Tag>) // std::uint8_t
-            {
-                return std::false_type();
-            }
-            else
-            {
-                return std::true_type();
-            }
-        };
-
-        using Parameters = std::tuple<
-            select_type_t<0, P1>, select_type_t<1, P2>,
-            select_type_t<2, P3>, select_type_t<3, P4>>;
-        using Reduced = reduce_t<decltype(reduce_op), std::tuple<>, Parameters>;
-        return filter_t<decltype(filter_op), Reduced>();
-    }
-
-    using UnpackTuple = decltype(do_());
-
-    template<unsigned Index, int Tag>
-    constexpr Match& set_byte(byte_placeholder<Tag> p)
-    {
-        std::get<Index>(opcode_) = {p};
-        return *this;
-    }
-
-    template<unsigned Index>
-#if (X_HAS_CONCEPTS())
-    constexpr Match& set_byte(std::integral auto v)
-#else
-    constexpr Match& set_byte(int v)
-#endif
-    {
-        std::get<Index>(opcode_) = {std::uint8_t(v)};
-        return *this;
-    }
-
-    template<unsigned Index>
-    constexpr bool check_impl(unsigned v) const
-    {
-        const auto& or_ = std::get<Index>(opcode_);
-        assert(or_.index() != std::variant_npos);
-        if (const std::uint8_t* to_match = std::get_if<std::uint8_t>(&or_))
-        {
-            return (*to_match == std::uint8_t(v));
-        }
-        // byte_placeholder<>.
-        return true;
-    }
-
-    constexpr bool check(std::uint16_t opcode) const
-    {
-        const unsigned bytes[] =
-        {
-            (opcode & 0xF000u) >> 12u,
-            (opcode & 0x0F00u) >>  8u,
-            (opcode & 0x00F0u) >>  4u,
-            (opcode & 0x000Fu) >>  0u,
-        };
-        return check_impl<0>(bytes[0])
-            && check_impl<1>(bytes[1])
-            && check_impl<2>(bytes[2])
-            && check_impl<3>(bytes[3]);
-    }
-
-
-    template<typename F>
-    constexpr void invoke(F&& f, std::uint16_t opcode) const
-    {
-        (void)std::apply(std::forward<F>(f)
-            , as_arguments_tuple<UnpackTuple>(opcode));
-    }
-};
-
-template<typename T, typename ReduceOp, typename TransformOp>
-constexpr T outer_index_product(std::uint8_t rows, std::uint8_t columns
-    , T init
-    , ReduceOp reduce
-    , TransformOp transform)
-{
-    for (std::uint8_t r  = 0; r < rows; ++r)
-    {
-        for (std::uint8_t c = 0; c < columns; ++c)
-        {
-            init = reduce(std::move(init), transform(r, c));
-        }
-    }
-    return init;
-}
-
-template<typename F, typename M>
-struct OpCodeOperation
-{
-    F op_;
-    M match_;
-
-    constexpr bool operator()(std::uint16_t opcode) const
-    {
-        if (match_.check(opcode))
-        {
-            match_.invoke(std::move(op_), opcode);
-            return true;
-        }
-        return false;
-    }
-};
-
-template<typename F, typename M>
-OpCodeOperation(F, M) -> OpCodeOperation<F, M>;
-
-#if (X_HAS_CONCEPTS())
-template<typename T>
-concept AnyByte = std::is_integral_v<T> || is_placeholder_v<T>;
-
-template<typename F, typename R = void>
-concept FunctionNoArg = std::invocable<F>
-    && std::is_same_v<R, std::invoke_result_t<F>>;
-
-template<typename F, typename P, typename R = void>
-concept FunctionOneArg = std::invocable<F, P>
-    && std::is_same_v<R, std::invoke_result_t<F, P>>;
-#endif
-
-#if (X_HAS_CONCEPTS())
-template<typename B1, typename B2, typename B3, typename B4, typename F>
-constexpr auto code(B1 b1, B2 b2, B3 b3, B4 b4, F f)
-    requires AnyByte<B1>
-          && AnyByte<B2>
-          && AnyByte<B3>
-          && AnyByte<B4>
-    // #TODO: constrain F.
-#else
-template<typename B1, typename B2, typename B3, typename B4, typename F>
-constexpr auto code(B1 b1, B2 b2, B3 b3, B4 b4, F f)
-#endif
-{
-    using M = Match<B1, B2, B3, B4>;
-
-    M match;
-    match.template set_byte<0>(b1);
-    match.template set_byte<1>(b2);
-    match.template set_byte<2>(b3);
-    match.template set_byte<3>(b4);
-    return OpCodeOperation<F, M>{std::move(f), std::move(match)};
-}
-
-#if (X_HAS_CONCEPTS())
-template<typename... Ops>
-void match_opcode(std::uint16_t opcode, FunctionNoArg auto catch_all
-    // error C3546: '...': there are no parameter packs available to expand
-    //, FunctionOneArg<std::uint16_t/*parameter*/, bool/*return type*/> auto... ops)
-    , Ops... ops)
-#else
-template<typename F, typename... Ops>
-void match_opcode(std::uint16_t opcode, F catch_all, Ops... ops)
-#endif
-{
-    const bool handled = (ops(opcode) || ...);
-    if (!handled)
-    {
-        catch_all();
-    }
-}
-
-static std::uint8_t overflow_add(std::uint8_t lhs, std::uint8_t rhs
-    , std::uint8_t& carry)
-{
-    static_assert(sizeof(int) > sizeof(std::uint8_t));
-    const int v = (lhs + rhs);
-    carry = ((v > 255) ? 1 : 0);
-    return std::uint8_t(v);
-}
-
-static std::uint8_t overflow_sub(std::uint8_t lhs, std::uint8_t rhs
-    , std::uint8_t& borrow)
-{
-    if (lhs >= rhs)
-    {
-        borrow = 0;
-        return (lhs - rhs);
-    }
-    else // if (rhs > lhs)
-    {
-        borrow = 1;
-        return (rhs - lhs);
-    }
-}
-
-static std::uint8_t random_byte(std::random_device& rd)
-{
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dist(0, int(std::uint8_t(-1)));
-    return std::uint8_t(dist(gen));
-}
-
-// ROMS.
+// ROMS:
 // https://github.com/ColinEberhardt/wasm-rust-chip8/tree/master/web/roms
+// Docs:
+// http://devernay.free.fr/hacks/chip8/C8TECH10.HTM
+// https://github.com/JamesGriffin/CHIP-8-Emulator
+// https://blog.scottlogic.com/2017/12/13/chip8-emulator-webassembly-rust.html
 
 static constexpr std::uint8_t kDisplayWidth = 64;
 static constexpr std::uint8_t kDisplayHeight = 32;
 
-constexpr std::uint8_t kHexDigitsSprites[] =
-{
-    0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
-    0x20, 0x60, 0x20, 0x20, 0x70, // 1
-    0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
-    0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
-    0x90, 0x90, 0xF0, 0x10, 0x10, // 4
-    0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
-    0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
-    0xF0, 0x10, 0x20, 0x40, 0x40, // 7
-    0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
-    0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
-    0xF0, 0x90, 0xF0, 0x90, 0x90, // A
-    0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
-    0xF0, 0x80, 0x80, 0x80, 0xF0, // C
-    0xE0, 0x90, 0x90, 0x90, 0xE0, // D
-    0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
-    0xF0, 0x80, 0xF0, 0x80, 0x80  // F
-};
-
-// http://devernay.free.fr/hacks/chip8/C8TECH10.HTM
-// https://github.com/JamesGriffin/CHIP-8-Emulator
-// https://blog.scottlogic.com/2017/12/13/chip8-emulator-webassembly-rust.html
-// 
 struct Chip8
 {
     std::uint8_t memory_[4 * 1024];
@@ -514,6 +66,7 @@ struct Chip8
     Chip8(Chip8&&) = delete;
     Chip8& operator=(Chip8&&) = delete;
 
+    void boot_up();
     bool draw(std::uint8_t x, std::uint8_t y
         , std::span<const std::uint8_t> sprite);
     void clear_display();
@@ -522,6 +75,32 @@ struct Chip8
     void execute_opcode(std::uint16_t opcode);
 };
 
+constexpr std::uint8_t kHexDigitsSprites[] =
+{
+    0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+    0x20, 0x60, 0x20, 0x20, 0x70, // 1
+    0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+    0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+    0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+    0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+    0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+    0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+    0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+    0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+    0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+    0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+    0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+    0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+    0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+    0xF0, 0x80, 0xF0, 0x80, 0x80  // F
+};
+
+static std::uint8_t overflow_add(std::uint8_t lhs, std::uint8_t rhs
+    , std::uint8_t& carry);
+static std::uint8_t overflow_sub(std::uint8_t lhs, std::uint8_t rhs
+    , std::uint8_t& borrow);
+static std::uint8_t random_byte(std::random_device& rd);
+
 void Chip8::execute_cycle()
 {
     const std::uint16_t opcode = std::uint16_t(
@@ -529,6 +108,16 @@ void Chip8::execute_cycle()
     
     pc_ += 2;
     execute_opcode(opcode);
+
+    // Note: wrong. Should be decreased at 60 Hz speed.
+    if (delay_timer_ > 0)
+    {
+        --delay_timer_;
+    }
+    if (sound_timer_ > 0)
+    {
+        --sound_timer_;
+    }
 }
 
 void Chip8::execute_opcode(std::uint16_t opcode)
@@ -662,37 +251,22 @@ void Chip8::execute_opcode(std::uint16_t opcode)
         );
 
     assert(pc_ < std::size(memory_));
-
-    // Note: wrong. Should be decreased at 60 Hz speed.
-    if (delay_timer_ > 0)
-    {
-        --delay_timer_;
-    }
-    if (sound_timer_ > 0)
-    {
-        --sound_timer_;
-    }
 }
 
-void Chip8::clear_display()
+template<typename T, typename ReduceOp, typename TransformOp>
+constexpr T outer_index_product(std::uint8_t rows, std::uint8_t columns
+    , T init
+    , ReduceOp reduce
+    , TransformOp transform)
 {
-    std::fill(&display_memory_[0][0]
-        , &display_memory_[0][0] + sizeof(display_memory_)
-        , std::uint8_t(0));
-}
-
-void Chip8::wait_any_key(std::uint8_t vindex)
-{
-    pc_ -= 2; // busy wait.
-    waits_keyboard_ = true;
-    auto it = std::find(std::cbegin(keys_), std::cend(keys_), true);
-    if (it == std::cend(keys_))
+    for (std::uint8_t r  = 0; r < rows; ++r)
     {
-        return;
+        for (std::uint8_t c = 0; c < columns; ++c)
+        {
+            init = reduce(std::move(init), transform(r, c));
+        }
     }
-    V_[vindex] = std::uint8_t(it - std::cbegin(keys_));
-    pc_ += 2;
-    waits_keyboard_ = false;
+    return init;
 }
 
 bool Chip8::draw(std::uint8_t x, std::uint8_t y
@@ -730,6 +304,65 @@ bool Chip8::draw(std::uint8_t x, std::uint8_t y
         std::uint8_t y_wrap = (y + r) % kDisplayHeight;
         return DrawInput{new_value == 1, x_wrap, y_wrap};
     });
+}
+
+void Chip8::boot_up()
+{
+    pc_ = 0x200;
+    needs_redraw_ = true;
+    std::copy(std::begin(kHexDigitsSprites), std::end(kHexDigitsSprites), memory_);
+}
+
+void Chip8::clear_display()
+{
+    std::fill(&display_memory_[0][0]
+        , &display_memory_[0][0] + sizeof(display_memory_)
+        , std::uint8_t(0));
+}
+
+void Chip8::wait_any_key(std::uint8_t vindex)
+{
+    pc_ -= 2; // busy wait.
+    waits_keyboard_ = true;
+    auto it = std::find(std::cbegin(keys_), std::cend(keys_), true);
+    if (it == std::cend(keys_))
+    {
+        return;
+    }
+    V_[vindex] = std::uint8_t(it - std::cbegin(keys_));
+    pc_ += 2;
+    waits_keyboard_ = false;
+}
+
+static std::uint8_t overflow_add(std::uint8_t lhs, std::uint8_t rhs
+    , std::uint8_t& carry)
+{
+    static_assert(sizeof(int) > sizeof(std::uint8_t));
+    const int v = (lhs + rhs);
+    carry = ((v > 255) ? 1 : 0);
+    return std::uint8_t(v);
+}
+
+static std::uint8_t overflow_sub(std::uint8_t lhs, std::uint8_t rhs
+    , std::uint8_t& borrow)
+{
+    if (lhs >= rhs)
+    {
+        borrow = 0;
+        return (lhs - rhs);
+    }
+    else // if (rhs > lhs)
+    {
+        borrow = 1;
+        return (rhs - lhs);
+    }
+}
+
+static std::uint8_t random_byte(std::random_device& rd)
+{
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dist(0, int(std::uint8_t(-1)));
+    return std::uint8_t(dist(gen));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -964,9 +597,7 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
 
     std::random_device rd;
     Chip8 chip8(rd);
-
-    chip8.pc_ = 0x200;
-    chip8.needs_redraw_ = true;
+    chip8.boot_up();
 
     const bool read = ReadAllFileAsBinary(R"(roms/WIPEOFF)"
         , {chip8.memory_ + chip8.pc_, (std::size(chip8.memory_) - chip8.pc_)});
