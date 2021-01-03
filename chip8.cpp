@@ -1,4 +1,3 @@
-#include <concepts>
 #include <variant>
 #include <algorithm>
 #include <numeric>
@@ -12,6 +11,16 @@
 #  undef NDEBUG
 #endif
 #include <cassert>
+
+#if (__EMSCRIPTEN__)
+# define X_HAS_CONCEPTS() 0
+#else
+# define X_HAS_CONCEPTS() 1
+#endif
+
+#if (X_HAS_CONCEPTS())
+#  include <concepts>
+#endif
 
 #include <SDL2/SDL.h>
 
@@ -34,14 +43,18 @@ struct Match
         return Byte(_);
     }
 
+#if (X_HAS_CONCEPTS())
     static constexpr Byte make_byte(std::integral auto v)
+#else
+    static constexpr Byte make_byte(int v)
+#endif
     {
         return Byte(std::uint8_t(v));
     }
 
     bool check(std::uint16_t opcode) const
     {
-        const int bytes[] =
+        const unsigned bytes[] =
         {
             (opcode & 0xF000u) >> 12u,
             (opcode & 0x0F00u) >>  8u,
@@ -53,7 +66,7 @@ struct Match
             , std::cbegin(bytes)
             , true
             , [](bool prev, bool now) { return (prev && now); }
-            , [](Byte b, int v)
+            , [](Byte b, unsigned v)
         {
             if (std::get_if<byte_placeholder>(&b))
             {
@@ -105,6 +118,7 @@ struct OpCodeOperation
 template<typename F>
 OpCodeOperation(F, Match) -> OpCodeOperation<F>;
 
+#if (X_HAS_CONCEPTS())
 template<typename T>
 concept AnyByte = std::is_integral_v<T> || std::is_same_v<T, byte_placeholder>;
 
@@ -115,21 +129,32 @@ concept FunctionNoArg = std::invocable<F>
 template<typename F, typename P, typename R = void>
 concept FunctionOneArg = std::invocable<F, P>
     && std::is_same_v<R, std::invoke_result_t<F, P>>;
+#endif
 
+#if (X_HAS_CONCEPTS())
 constexpr auto code(AnyByte auto b1, AnyByte auto b2
     , AnyByte auto b3, AnyByte auto b4
     , FunctionNoArg auto f)
+#else
+template<typename B1, typename B2, typename B3, typename B4, typename F>
+constexpr auto code(B1 b1, B2 b2, B3 b3, B4 b4, F f)
+#endif
 {
-    return OpCodeOperation(std::move(f)
+    return OpCodeOperation<decltype(f)>{std::move(f)
         , Match({Match::make_byte(b1), Match::make_byte(b2),
-                 Match::make_byte(b3), Match::make_byte(b4)}));
+                 Match::make_byte(b3), Match::make_byte(b4)})};
 }
 
-template<typename... F>
+#if (X_HAS_CONCEPTS())
+template<typename... Ops>
 void match_opcode(std::uint16_t opcode, FunctionNoArg auto catch_all
     // error C3546: '...': there are no parameter packs available to expand
     //, FunctionOneArg<std::uint16_t/*parameter*/, bool/*return type*/> auto... ops)
-    , F... ops)
+    , Ops... ops)
+#else
+template<typename F, typename... Ops>
+void match_opcode(std::uint16_t opcode, F catch_all, Ops... ops)
+#endif
 {
     const bool handled = (ops(opcode) || ...);
     if (!handled)
@@ -239,7 +264,6 @@ struct Chip8
     Chip8(Chip8&&) = delete;
     Chip8& operator=(Chip8&&) = delete;
 
-    void start_with_rom(const void* data, std::size_t size);
     bool draw(std::uint8_t x, std::uint8_t y
         , std::span<const std::uint8_t> sprite);
     void clear_display();
@@ -470,49 +494,20 @@ bool Chip8::draw(std::uint8_t x, std::uint8_t y
     });
 }
 
-void Chip8::start_with_rom(const void* data, std::size_t size)
-{
-    pc_ = 0x200;
-    assert((std::size(memory_) - pc_) >= size);
-    const std::uint8_t* begin = static_cast<const std::uint8_t*>(data);
-    std::copy(begin, begin + size, memory_ + pc_);
-}
-
-//-----------------------------------------------------------------------------
-#include <chrono>
-#include <thread>
+///////////////////////////////////////////////////////////////////////////////
+// Render loop.
 #include <cstdlib>
 
-struct FileBuffer
+constexpr uint8_t kKeymap[] =
 {
-    void* data_ = nullptr;
-    std::size_t size_ = 0;
-
-    FileBuffer() noexcept = default;
-    FileBuffer(const FileBuffer&) = delete;
-    FileBuffer& operator=(const FileBuffer&) = delete;
-    FileBuffer& operator=(FileBuffer&&) = delete;
-
-    FileBuffer(FileBuffer&& rhs) noexcept;
-    ~FileBuffer() noexcept;
+    SDLK_x, SDLK_1, SDLK_2, SDLK_3,
+    SDLK_q, SDLK_w, SDLK_e, SDLK_a,
+    SDLK_s, SDLK_d, SDLK_z, SDLK_c,
+    SDLK_4, SDLK_r, SDLK_f, SDLK_v,
 };
 
-FileBuffer ReadAllFileAsBinary(const char* filepath);
-
-FileBuffer::FileBuffer(FileBuffer&& rhs) noexcept
-    : data_(std::exchange(rhs.data_, nullptr))
-    , size_(std::exchange(rhs.size_, 0))
-{
-}
-
-FileBuffer::~FileBuffer() noexcept
-{
-    free(data_);
-    data_ = nullptr;
-    size_ = 0;
-}
-
-FileBuffer ReadAllFileAsBinary(const char* filepath)
+static bool ReadAllFileAsBinary(const char* filepath
+    , std::span<std::uint8_t> buffer)
 {
 #if (_MSC_VER)
     FILE* f = nullptr;
@@ -523,7 +518,7 @@ FileBuffer ReadAllFileAsBinary(const char* filepath)
 #endif
     if (!f)
     {
-        return {};
+        return false;
     }
     struct Close_
     {
@@ -537,35 +532,32 @@ FileBuffer ReadAllFileAsBinary(const char* filepath)
     int status = fseek(f, 0, SEEK_END);
     if (status != 0)
     {
-        return {};
+        return false;
     }
     const long fsize = ftell(f);
     if (fsize == -1L)
     {
-        return {};
+        return false;
     }
     status = fseek(f, 0, SEEK_SET);
     if (status != 0)
     {
-        return {};
+        return false;
     }
     const std::size_t size_to_read = static_cast<std::size_t>(fsize);
-    FileBuffer buffer;
-    buffer.data_ = malloc(size_to_read);
-    buffer.size_ = size_to_read;
-    if (!buffer.data_)
+    if (size_to_read > buffer.size())
     {
-        return {};
+        return false;
     }
-    const std::size_t read = fread(buffer.data_, 1, size_to_read, f);
+    const std::size_t read = fread(&buffer[0], 1, size_to_read, f);
     if (read != size_to_read)
     {
-        return {};
+        return false;
     }
-    return buffer;
+    return true;
 }
 
-void AbortOnSDLError(int code)
+static void AbortOnSDLError(int code)
 {
     if (code != 0)
     {
@@ -574,7 +566,7 @@ void AbortOnSDLError(int code)
     }
 }
 
-void AbortOnSDLError(const void* resource)
+static void AbortOnSDLError(const void* resource)
 {
     if (!resource)
     {
@@ -586,21 +578,14 @@ void AbortOnSDLError(const void* resource)
 struct TickData
 {
     Chip8& chip8_;
+    // Leak all resources intentionally.
     SDL_Renderer* renderer_ = nullptr;
     SDL_Texture* picture_ = nullptr;
     std::uint32_t* pixels_ = nullptr;
     bool quit_ = false;
 };
 
-constexpr uint8_t kKeymap[] =
-{
-    SDLK_x, SDLK_1, SDLK_2, SDLK_3,
-    SDLK_q, SDLK_w, SDLK_e, SDLK_a,
-    SDLK_s, SDLK_d, SDLK_z, SDLK_c,
-    SDLK_4, SDLK_r, SDLK_f, SDLK_v,
-};
-
-void MainTick(void* data_ptr)
+static void MainTick(void* data_ptr)
 {
     TickData* data = static_cast<TickData*>(data_ptr);
     Chip8& chip8 = data->chip8_;
@@ -686,7 +671,7 @@ void MainTick(void* data_ptr)
 #if (__EMSCRIPTEN__)
 #include <emscripten/emscripten.h>
 
-void MainLoop(TickData& data)
+static void MainLoop(TickData& data)
 {
     emscripten_set_main_loop_arg(&MainTick
         , &data
@@ -702,7 +687,7 @@ int main(int, char**)
 #include <Windows.h>
 #include <tchar.h>
 
-void MainLoop(TickData& data)
+static void MainLoop(TickData& data)
 {
     while (!data.quit_)
     {
@@ -722,8 +707,8 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
         "Chip8 Emulator" // title
         , SDL_WINDOWPOS_CENTERED // x position
         , SDL_WINDOWPOS_CENTERED // y position
-        , 640
-        , 320
+        , kDisplayWidth * 10
+        , kDisplayHeight * 10
         , SDL_WINDOW_SHOWN | SDL_WINDOW_BORDERLESS);
     AbortOnSDLError(window);
     SDL_Renderer* renderer = SDL_CreateRenderer(
@@ -731,9 +716,6 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
         , -1 // first supporting renderer
         , SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     AbortOnSDLError(renderer);
-
-    std::random_device rd;
-    Chip8 chip8(rd);
 
     SDL_Texture* picture = SDL_CreateTexture(renderer,
         SDL_PIXELFORMAT_ARGB8888,
@@ -743,14 +725,15 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
 
     std::uint32_t pixels[kDisplayWidth * kDisplayHeight]{};
 
-    //FileBuffer file = ReadAllFileAsBinary(R"(D:\Downloads\TICTAC)");
-    FileBuffer file = ReadAllFileAsBinary(R"(D:\Downloads\WIPEOFF)");
-    //FileBuffer file = ReadAllFileAsBinary(R"(D:\Downloads\INVADERS)");
-    
-    assert(!!file.data_);
+    std::random_device rd;
+    Chip8 chip8(rd);
 
-    chip8.start_with_rom(file.data_, file.size_);
+    chip8.pc_ = 0x200;
     chip8.needs_redraw_ = true;
+
+    const bool read = ReadAllFileAsBinary(R"(roms/WIPEOFF)"
+        , {chip8.memory_ + chip8.pc_, (std::size(chip8.memory_) - chip8.pc_)});
+    assert(read);
 
     TickData data{chip8, renderer, picture, pixels};
     MainLoop(data);
