@@ -122,132 +122,133 @@ void Chip8::execute_cycle()
 
 void Chip8::execute_opcode(std::uint16_t opcode)
 {
-    match_opcode(opcode
-        , []() { assert(false && "Unknown opcode."); }
-        , code(0x0, 0x0, 0xE, 0x0, [&]()
+    match_opcode(*this, opcode
+        , [](Chip8&) { assert(false && "Unknown opcode."); }
+        , code(0x0, 0x0, 0xE, 0x0, [](Chip8& self)
         { /*CLS*/
-            clear_display(); })
-        , code(0x0, 0x0, 0xE, 0xE, [&]()
+            self.clear_display(); })
+        , code(0x0, 0x0, 0xE, 0xE, [](Chip8& self)
         { /*RET*/
-            assert(sp_ > 0);
-            --sp_;
-            assert(sp_ < std::size(stack_));
-            pc_ = stack_[sp_]; })
-        , code(0x0, _n, _n, _n, [](std::uint16_t)
+            assert(self.sp_ > 0);
+            --self.sp_;
+            assert(self.sp_ < std::size(self.stack_));
+            self.pc_ = self.stack_[self.sp_]; })
+        , code(0x0, _n, _n, _n, [](Chip8&, std::uint16_t)
         { /* SYS addr. This instruction is only used on the old computers
             on which Chip-8 was originally implemented.
             It is ignored by modern interpreters. */ })
-        , code(0x1, _n, _n, _n, [&](std::uint16_t nnn)
+        , code(0x1, _n, _n, _n, [](Chip8& self, std::uint16_t nnn)
         { /* JP addr. */
-            pc_ = nnn; })
-        , code(0x2, _n, _n, _n, [&](std::uint16_t nnn)
+            self.pc_ = nnn; })
+        , code(0x2, _n, _n, _n, [](Chip8& self, std::uint16_t nnn)
         { /* CALL addr. */
-            assert(sp_ < std::size(stack_));
-            stack_[sp_] = pc_;
-            ++sp_;
-            pc_ = nnn; })
-        , code(0x3, _x, _k, _k, [&](std::uint8_t x, std::uint8_t kk)
+            assert(self.sp_ < std::size(self.stack_));
+            self.stack_[self.sp_] = self.pc_;
+            ++self.sp_;
+            self.pc_ = nnn; })
+        , code(0x3, _x, _k, _k, [](Chip8& self, std::uint8_t x, std::uint8_t kk)
         { /* SE Vx, byte. */
-            pc_ += ((V_[x] == kk) ? 2 : 0); })
-        , code(0x4, _x, _k, _k, [&](std::uint8_t x, std::uint8_t kk)
+            self.pc_ += ((self.V_[x] == kk) ? 2 : 0); })
+        , code(0x4, _x, _k, _k, [](Chip8& self, std::uint8_t x, std::uint8_t kk)
         { /* SNE Vx, byte. */
-            pc_ += ((V_[x] != kk) ? 2 : 0); })
-        , code(0x5, _x, _y, 0x0, [&](std::uint8_t x, std::uint8_t y)
+            self.pc_ += ((self.V_[x] != kk) ? 2 : 0); })
+        , code(0x5, _x, _y, 0x0, [](Chip8& self, std::uint8_t x, std::uint8_t y)
         { /* SE Vx, Vy. */
-            pc_ += ((V_[x] == V_[y]) ? 2 : 0); })
-        , code(0x6, _x, _k, _k, [&](std::uint8_t x, std::uint8_t kk)
+            self.pc_ += ((self.V_[x] == self.V_[y]) ? 2 : 0); })
+        , code(0x6, _x, _k, _k, [](Chip8& self, std::uint8_t x, std::uint8_t kk)
         { /* LD Vx, byte. */
-            V_[x] = kk; })
-        , code(0x7, _x, _k, _k, [&](std::uint8_t x, std::uint8_t kk)
+            self.V_[x] = kk; })
+        , code(0x7, _x, _k, _k, [](Chip8& self, std::uint8_t x, std::uint8_t kk)
         { /* ADD Vx, byte. */
-            V_[x] += kk; })
-        , code(0x8, _x, _y, 0x0, [&](std::uint8_t x, std::uint8_t y)
+            self.V_[x] += kk; })
+        , code(0x8, _x, _y, 0x0, [](Chip8& self, std::uint8_t x, std::uint8_t y)
         { /* LD Vx, Vy. */
-            V_[x] = V_[y]; })
-        , code(0x8, _x, _y, 0x1, [&](std::uint8_t x, std::uint8_t y)
+            self.V_[x] = self.V_[y]; })
+        , code(0x8, _x, _y, 0x1, [](Chip8& self, std::uint8_t x, std::uint8_t y)
         { /* OR Vx, Vy. */
-            V_[x] = V_[x] | V_[y]; })
-        , code(0x8, _x, _y, 0x2, [&](std::uint8_t x, std::uint8_t y)
+            self.V_[x] = self.V_[x] | self.V_[y]; })
+        , code(0x8, _x, _y, 0x2, [](Chip8& self, std::uint8_t x, std::uint8_t y)
         { /* AND Vx, Vy. */
-            V_[x] = V_[x] & V_[y]; })
-        , code(0x8, _x, _y, 0x3, [&](std::uint8_t x, std::uint8_t y)
+            self.V_[x] = self.V_[x] & self.V_[y]; })
+        , code(0x8, _x, _y, 0x3, [](Chip8& self, std::uint8_t x, std::uint8_t y)
         { /* XOR Vx, Vy. */
-            V_[x] = V_[x] ^ V_[y]; })
-        , code(0x8, _x, _y, 0x4, [&](std::uint8_t x, std::uint8_t y)
+            self.V_[x] = self.V_[x] ^ self.V_[y]; })
+        , code(0x8, _x, _y, 0x4, [](Chip8& self, std::uint8_t x, std::uint8_t y)
         { /* ADD Vx, Vy. */
-            V_[x] = overflow_add(V_[x], V_[y], V_[0xF]); })
-        , code(0x8, _x, _y, 0x5, [&](std::uint8_t x, std::uint8_t y)
+            self.V_[x] = overflow_add(self.V_[x], self.V_[y], self.V_[0xF]); })
+        , code(0x8, _x, _y, 0x5, [](Chip8& self, std::uint8_t x, std::uint8_t y)
         { /* SUB Vx, Vy. */
-            V_[x] = overflow_sub(V_[x], V_[y], V_[0xF]);
-            V_[0xF] = ((V_[0xF] == 0) ? 1 : 0); })
-        , code(0x8, _x, _, 0x6, [&](std::uint8_t x)
+            self.V_[x] = overflow_sub(self.V_[x], self.V_[y], self.V_[0xF]);
+            self.V_[0xF] = ((self.V_[0xF] == 0) ? 1 : 0); })
+        , code(0x8, _x, _, 0x6, [](Chip8& self, std::uint8_t x)
         { /* SHR Vx {, Vy}. */
-            V_[0xF] = V_[x] & 0x1;
-            V_[x] >>= 1; })
-        , code(0x8, _x, _y, 0x7, [&](std::uint8_t x, std::uint8_t y)
+            self.V_[0xF] = self.V_[x] & 0x1;
+            self.V_[x] >>= 1; })
+        , code(0x8, _x, _y, 0x7, [](Chip8& self, std::uint8_t x, std::uint8_t y)
         { /* SUBN Vx, Vy. */
-            V_[x] = overflow_sub(V_[y], V_[x], V_[0xF]);
-            V_[0xF] = ((V_[0xF] == 0) ? 1 : 0); })
-        , code(0x8, _x, _, 0xE, [&](std::uint8_t x)
+            self.V_[x] = overflow_sub(self.V_[y], self.V_[x], self.V_[0xF]);
+            self.V_[0xF] = ((self.V_[0xF] == 0) ? 1 : 0); })
+        , code(0x8, _x, _, 0xE, [](Chip8& self, std::uint8_t x)
         { /* SHL Vx {, Vy}. */
-            V_[0xF] = V_[x] & 0x80;
-            V_[x] <<= 1; })
-        , code(0x9, _x, _y, 0x0, [&](std::uint8_t x, std::uint8_t y)
+            self.V_[0xF] = self.V_[x] & 0x80;
+            self.V_[x] <<= 1; })
+        , code(0x9, _x, _y, 0x0, [](Chip8& self, std::uint8_t x, std::uint8_t y)
         { /* SNE Vx, Vy. */
-            pc_ += ((V_[x] != V_[y]) ? 2 : 0); })
-        , code(0xA, _n, _n, _n, [&](std::uint16_t nnn)
+            self.pc_ += ((self.V_[x] != self.V_[y]) ? 2 : 0); })
+        , code(0xA, _n, _n, _n, [](Chip8& self, std::uint16_t nnn)
         { /* LD I, addr. */
-            I_ = nnn; })
-        , code(0xB, _n, _n, _n, [&](std::uint16_t nnn)
+            self.I_ = nnn; })
+        , code(0xB, _n, _n, _n, [](Chip8& self, std::uint16_t nnn)
         { /* JP V0, addr. */
-            pc_ = std::uint16_t(nnn + V_[0]); })
-        , code(0xC, _x, _k, _k, [&](std::uint8_t x, std::uint8_t kk)
+            self.pc_ = std::uint16_t(nnn + self.V_[0]); })
+        , code(0xC, _x, _k, _k, [](Chip8& self, std::uint8_t x, std::uint8_t kk)
         { /* RND Vx, byte. */
-            V_[x] = random_byte(*rd_) & kk; })
-        , code(0xD, _x, _y, _n, [&](std::uint8_t x, std::uint8_t y, std::uint8_t n)
+            self.V_[x] = random_byte(*self.rd_) & kk; })
+        , code(0xD, _x, _y, _n, [](Chip8& self, std::uint8_t x, std::uint8_t y, std::uint8_t n)
         { /* DRW Vx, Vy, nibble. */
-            const bool collision = draw(V_[x], V_[y], {memory_ + I_, n});
-            needs_redraw_ = true;
-            V_[0xF] = (collision ? 1 : 0); })
-        , code(0xE, _x, 0x9, 0xE, [&](std::uint8_t x)
+            const bool collision = self.draw(self.V_[x], self.V_[y]
+                , {self.memory_ + self.I_, n});
+            self.V_[0xF] = (collision ? 1 : 0);
+            self.needs_redraw_ = true; })
+        , code(0xE, _x, 0x9, 0xE, [](Chip8& self, std::uint8_t x)
         { /* SKP Vx. */
-            pc_ += (keys_[V_[x]] ? 2 : 0); })
-        , code(0xE, _x, 0xA, 0x1, [&](std::uint8_t x)
+            self.pc_ += (self.keys_[self.V_[x]] ? 2 : 0); })
+        , code(0xE, _x, 0xA, 0x1, [](Chip8& self, std::uint8_t x)
         { /* SKNP Vx. */
-            pc_ += (!keys_[V_[x]] ? 2 : 0); })
-        , code(0xF, _x, 0x0, 0x7, [&](std::uint8_t x)
+            self.pc_ += (!self.keys_[self.V_[x]] ? 2 : 0); })
+        , code(0xF, _x, 0x0, 0x7, [](Chip8& self, std::uint8_t x)
         { /* LD Vx, DT. */
-            V_[x] = delay_timer_; })
-        , code(0xF, _x, 0x0, 0xA, [&](std::uint8_t x)
+            self.V_[x] = self.delay_timer_; })
+        , code(0xF, _x, 0x0, 0xA, [](Chip8& self, std::uint8_t x)
         { /* LD Vx, K. */
-            wait_any_key(x); })
-        , code(0xF, _x, 0x1, 0x5, [&](std::uint8_t x)
+            self.wait_any_key(x); })
+        , code(0xF, _x, 0x1, 0x5, [](Chip8& self, std::uint8_t x)
         { /* LD DT, Vx. */
-            delay_timer_ = V_[x]; })
-        , code(0xF, _x, 0x1, 0x8, [&](std::uint8_t x)
+            self.delay_timer_ = self.V_[x]; })
+        , code(0xF, _x, 0x1, 0x8, [](Chip8& self, std::uint8_t x)
         { /* LD ST, Vx. */
-            sound_timer_ = V_[x]; })
-        , code(0xF, _x, 0x1, 0xE, [&](std::uint8_t x)
+            self.sound_timer_ = self.V_[x]; })
+        , code(0xF, _x, 0x1, 0xE, [](Chip8& self, std::uint8_t x)
         { /* ADD I, Vx. */
-            I_ += V_[x]; })
-        , code(0xF, _x, 0x2, 0x9, [&](std::uint8_t x)
+            self.I_ += self.V_[x]; })
+        , code(0xF, _x, 0x2, 0x9, [](Chip8& self, std::uint8_t x)
         { /* LD F, Vx. */
             const auto sprite_bytes = (std::size(kHexDigitsSprites) / 16);
-            I_ = std::uint16_t(V_[x] * sprite_bytes); })
-        , code(0xF, _x, 0x3, 0x3, [&](std::uint8_t x)
+            self.I_ = std::uint16_t(self.V_[x] * sprite_bytes); })
+        , code(0xF, _x, 0x3, 0x3, [](Chip8& self, std::uint8_t x)
         { /* LD B, Vx. */
-            std::uint8_t* ptr = (memory_ + I_);
-            ptr[0] = (V_[x] / 100);
-            ptr[1] = (V_[x] / 10) % 10;
-            ptr[2] = (V_[x] % 100) % 10; })
-        , code(0xF, _x, 0x5, 0x5, [&](std::uint8_t x)
+            std::uint8_t* ptr = (self.memory_ + self.I_);
+            ptr[0] = (self.V_[x] / 100);
+            ptr[1] = (self.V_[x] / 10) % 10;
+            ptr[2] = (self.V_[x] % 100) % 10; })
+        , code(0xF, _x, 0x5, 0x5, [](Chip8& self, std::uint8_t x)
         { /* LD [I], Vx. */
-            std::copy(V_, V_ + x + 1
-                , memory_ + I_); })
-        , code(0xF, _x, 0x6, 0x5, [&](std::uint8_t x)
+            std::copy(self.V_, self.V_ + x + 1
+                , self.memory_ + self.I_); })
+        , code(0xF, _x, 0x6, 0x5, [](Chip8& self, std::uint8_t x)
         { /* LD Vx, [I]. */
-            std::copy(memory_ + I_, memory_ + I_ + x + 1
-                , V_); })
+            std::copy(self.memory_ + self.I_, self.memory_ + self.I_ + x + 1
+                , self.V_); })
         );
 
     assert(pc_ < std::size(memory_));

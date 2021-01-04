@@ -540,12 +540,12 @@ struct Match
             && check_impl<3>(opcode);
     }
 
-
-    template<typename F>
-    constexpr void invoke(F&& f, std::uint16_t opcode) const
+    template<typename F, typename User>
+    constexpr void invoke(F&& f, User&& data, std::uint16_t opcode) const
     {
         (void)std::apply(std::forward<F>(f)
-            , as_arguments_tuple<FinalArgsMetadata>(opcode));
+            , std::tuple_cat(std::forward_as_tuple(std::forward<User>(data))
+                , as_arguments_tuple<FinalArgsMetadata>(opcode)));
     }
 };
 
@@ -600,11 +600,16 @@ struct X_EBO() OpCodeOperation : F
 {
     M match_;
 
-    constexpr bool try_invoke(std::uint16_t opcode) &&
+    template<typename User>
+    constexpr bool try_invoke(User&& data, std::uint16_t opcode) &&
     {
+        // static_assert(sizeof(*this) == 2);
+
         if (match_.check(opcode))
         {
-            match_.invoke(std::move(static_cast<F&>(*this)), opcode);
+            match_.invoke(std::move(static_cast<F&>(*this))
+                , std::forward<User>(data)
+                , opcode);
             return true;
         }
         return false;
@@ -617,10 +622,6 @@ OpCodeOperation(F, M) -> OpCodeOperation<F, M>;
 #if (X_HAS_CONCEPTS())
 template<typename T>
 concept AnyByte = std::is_integral_v<T> || is_placeholder_v<T>;
-
-template<typename F, typename R = void>
-concept FunctionNoArg = std::invocable<F>
-    && std::is_same_v<R, std::invoke_result_t<F>>;
 #endif
 
 #if (X_HAS_CONCEPTS())
@@ -666,21 +667,13 @@ static_assert(sizeof(code(_  , 0xb, 0xc, 0xd, examples_::empty())) == 2);
 static_assert(sizeof(code(_  , _n , 0xc, 0xd, examples_::empty())) == 2);
 #endif
 
-#if (X_HAS_CONCEPTS())
-template<typename... Ops>
-void match_opcode(std::uint16_t opcode, FunctionNoArg auto catch_all
-    // error C3546: '...': there are no parameter packs available to expand
-    //, FunctionOneArg<std::uint16_t/*parameter*/, bool/*return type*/> auto... ops)
-    , Ops... ops)
-#else
-template<typename F, typename... Ops>
-void match_opcode(std::uint16_t opcode, F catch_all, Ops... ops)
-#endif
+template<typename User, typename F, typename... Ops>
+void match_opcode(User&& data, std::uint16_t opcode, F catch_all, Ops... ops)
 {
-    const bool handled = (std::move(ops).try_invoke(opcode) || ...);
+    const bool handled = (std::move(ops).try_invoke(data, opcode) || ...);
     if (!handled)
     {
-        catch_all();
+        catch_all(data);
     }
 }
 
