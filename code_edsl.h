@@ -542,11 +542,50 @@ struct Match
     }
 };
 
+#if defined(X_SAMPLES)
+// All integer literals like in call `code(0xf, 0xa, 0xb, 0xc)`
+// are collapsed to nothing since everything is constant/known.
+static_assert(std::is_same_v<as_parameters_tuple_t<
+      Match<int, int, int, int>::FinalArgsMetadata>
+    , std::tuple<>>);
+// `_` match any & ignore placeholder is collapsed to nothing too.
+// code(_, _, _, _) -> []()
+static_assert(std::is_same_v<as_parameters_tuple_t<
+    Match<decltype(_), decltype(_), decltype(_), decltype(_)>::FinalArgsMetadata>
+    , std::tuple<>>);
+// All other (same) placeholders are combined together.
+// code(_n, _n, _n, _n) -> [](std::uint16_t).
+static_assert(std::is_same_v<as_parameters_tuple_t<
+      Match<decltype(_n), decltype(_n), decltype(_n), decltype(_n)>::FinalArgsMetadata>
+    , std::tuple<std::uint16_t>>);
+// 12 bits (3 hex parts) are matched to minimum possible std::uint16_t.
+// code(0x1, _n, _n, _n) -> [](std::uint16_t).
+static_assert(std::is_same_v<as_parameters_tuple_t<
+      Match<int, decltype(_n), decltype(_n), decltype(_n)>::FinalArgsMetadata>
+    , std::tuple<std::uint16_t>>);
+// code(0x1, 0x2, _n, _n) -> [](std::uint8_t).
+static_assert(std::is_same_v<as_parameters_tuple_t<
+      Match<int, int, decltype(_n), decltype(_n)>::FinalArgsMetadata>
+    , std::tuple<std::uint8_t>>);
+// code(0x1, _, _n, _) -> [](std::uint8_t).
+static_assert(std::is_same_v<as_parameters_tuple_t<
+      Match<int, decltype(_), decltype(_n), decltype(_)>::FinalArgsMetadata>
+    , std::tuple<std::uint8_t>>);
+// code(_x, _y, _n, _k) -> [](std::uint8_t, std::uint8_t, std::uint8_t, std::uint8_t).
+static_assert(std::is_same_v<as_parameters_tuple_t<
+      Match<decltype(_x), decltype(_y), decltype(_n), decltype(_k)>::FinalArgsMetadata>
+    , std::tuple<std::uint8_t, std::uint8_t, std::uint8_t, std::uint8_t>>);
+// code(0xa, _, 0xb, 0xc) -> []().
+static_assert(std::is_same_v<as_parameters_tuple_t<
+      Match<int, decltype(_), int, int>::FinalArgsMetadata>
+    , std::tuple<>>);
+#endif
+
 // Invokable that holds match rule and handler to be called.
 template<typename F, typename M>
 struct OpCodeOperation
 {
-    F op_;
+    /*[[no_unique_address]]*/ F op_;
     M match_;
 
     constexpr bool operator()(std::uint16_t opcode) const
@@ -594,6 +633,18 @@ constexpr auto code(B1 b1, B2 b2, B3 b3, B4 b4, F f)
     match.template set_byte<3>(b4);
     return OpCodeOperation<F, M>{std::move(f), std::move(match)};
 }
+
+#if defined(X_SAMPLES)
+static_assert(    code(0xa, 0xb, 0xc, 0xd, [] {}).match_.check(0xabcd));
+static_assert(not code(0xa, 0xb, 0xc, 0xd, [] {}).match_.check(0x0000));
+static_assert(code(_, 0xb, 0xc, 0xd, [] {}).match_.check(0xabcd));
+static_assert(code(_, 0xb, 0xc, 0xd, [] {}).match_.check(0x0bcd));
+static_assert(code(_, 0xb, 0xc, 0xd, [] {}).match_.check(0xbbcd));
+static_assert(not code(_, 0xb, 0xc, 0xd, [] {}).match_.check(0xaacd));
+static_assert(code(_, _, _, _, [] {}).match_.check(0xabcd));
+static_assert(code(_, _, _, _, [] {}).match_.check(0xffff));
+static_assert(code(_, _, _, 0xa, [] {}).match_.check(0xfffa));
+#endif
 
 #if (X_HAS_CONCEPTS())
 template<typename... Ops>
