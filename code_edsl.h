@@ -1,7 +1,6 @@
 #pragma once
 #include <type_traits>
 #include <tuple>
-#include <variant>
 #include <bit>
 
 #include <cstdint>
@@ -93,20 +92,20 @@ static_assert(not is_tag_int_v<int>);
 // Needed to make sure that int literals will not be reduced to
 // single match when doing reduce with placeholders. See below.
 template<unsigned Index, typename P>
-using select_type_t = std::conditional_t<
+using select_tag_t = std::conditional_t<
       std::is_integral_v<P>
     , tag_int<Index>
     , P>;
 
 #if defined(X_SAMPLES)
 static_assert(std::is_same_v<
-      select_type_t<0, int>
+      select_tag_t<0, int>
     , tag_int<0>>);
 static_assert(std::is_same_v<
-      select_type_t<1, decltype(_)>
+      select_tag_t<1, decltype(_)>
     , decltype(_)>);
 static_assert(std::is_same_v<
-      select_type_t<2, int>
+      select_tag_t<2, int>
     , tag_int<2>>);
 #endif
 
@@ -415,16 +414,15 @@ static_assert(
 template<typename P1, typename P2, typename P3, typename P4>
 struct Match
 {
-    template<typename P>
-    using MaybePlaceholder = std::variant<P, std::uint8_t>;
-    
-    using Rules = std::tuple<
-          MaybePlaceholder<P1>
-        , MaybePlaceholder<P2>
-        , MaybePlaceholder<P3>
-        , MaybePlaceholder<P4>>;
-    
-    Rules rules_;
+    using ActualParameters = std::tuple<P1, P2, P3, P4>;
+
+    // Each of 4 parameters may be either any integral
+    // literal or placeholder. In case it's int-like type,
+    // it should be 4 bits long max. As result, 2 bytes
+    // is enough to store any rule to match same 2 bytes opcode.
+    // (placeholders do not need to be stored. Placeholder type
+    // has all needed information to check & match).
+    std::uint16_t rules_ = 0;
     
     static constexpr auto map_parameters_impl()
     {
@@ -471,14 +469,14 @@ struct Match
             }
         };
 
-        using Parameters = std::tuple<
-              select_type_t<0, P1> // Either unique tag_int<> or byte_placeholder<>.
-            , select_type_t<1, P2>
-            , select_type_t<2, P3>
-            , select_type_t<3, P4>>;
+        using Tags = std::tuple<
+              select_tag_t<0, P1> // Either unique tag_int<> or byte_placeholder<>.
+            , select_tag_t<1, P2>
+            , select_tag_t<2, P3>
+            , select_tag_t<3, P4>>;
 
         // Group placeholders with same tags together.
-        using Reduced = reduce_t<decltype(reduce_op), std::tuple<>, Parameters>;
+        using Reduced = reduce_t<decltype(reduce_op), std::tuple<>, Tags>;
         // Remove not needed groups:
         // (1) group with "always ignore" _ tag.
         // (2) group/parameter with int literal that is know for the caller.
@@ -488,9 +486,15 @@ struct Match
     using FinalArgsMetadata = decltype(map_parameters_impl());
 
     template<unsigned Index, int Tag>
-    constexpr Match& set_byte(byte_placeholder<Tag> p)
+    constexpr Match& set_byte(byte_placeholder<Tag>)
     {
-        std::get<Index>(rules_) = {p};
+        // Check that the actual type at Index position
+        // is the same as specified in our template's parameters.
+        static_assert(std::is_same_v<
+              std::tuple_element_t<Index, ActualParameters>
+            , byte_placeholder<Tag>>);
+
+        // Nothing to store. Everything is in type.
         return *this;
     }
 
@@ -501,36 +505,39 @@ struct Match
     constexpr Match& set_byte(int v)
 #endif
     {
-        std::get<Index>(rules_) = {std::uint8_t(v)};
+#if (X_HAS_CONCEPTS())
+        // Check that the actual type at Index position
+        // is the same as specified in our template's parameters.
+        static_assert(std::is_same_v<
+              std::tuple_element_t<Index, ActualParameters>
+            , decltype(v)>);
+#endif
+        rules_ |= std::uint16_t(unsigned(v) << (16 - (Index + 1) * 4));
         return *this;
     }
 
     template<unsigned Index>
-    constexpr bool check_impl(unsigned v) const
+    constexpr bool check_impl(std::uint16_t opcode) const
     {
-        const auto& rule = std::get<Index>(rules_);
-        assert(rule.index() != std::variant_npos);
-        if (const std::uint8_t* to_match = std::get_if<std::uint8_t>(&rule))
+        if constexpr (is_placeholder_v<
+            std::tuple_element_t<Index, ActualParameters>>)
         {
-            return (*to_match == std::uint8_t(v));
+            // Named byte_placeholder<> matches anything.
+            return true;
         }
-        // byte_placeholder<>.
-        return true;
+        else
+        {
+            const std::uint16_t mask = std::uint16_t(0x000f << (16 - (Index + 1) * 4));
+            return ((rules_ & mask) == (opcode & mask));
+        }
     }
 
     constexpr bool check(std::uint16_t opcode) const
     {
-        const unsigned bytes[] =
-        {
-            (opcode & 0xF000u) >> 12u,
-            (opcode & 0x0F00u) >>  8u,
-            (opcode & 0x00F0u) >>  4u,
-            (opcode & 0x000Fu) >>  0u,
-        };
-        return check_impl<0>(bytes[0])
-            && check_impl<1>(bytes[1])
-            && check_impl<2>(bytes[2])
-            && check_impl<3>(bytes[3]);
+        return check_impl<0>(opcode)
+            && check_impl<1>(opcode)
+            && check_impl<2>(opcode)
+            && check_impl<3>(opcode);
     }
 
 
@@ -581,18 +588,23 @@ static_assert(std::is_same_v<as_parameters_tuple_t<
     , std::tuple<>>);
 #endif
 
+#if defined(_MSC_VER)
+#  define X_EBO() __declspec(empty_bases)
+#else
+#  define X_EBO()
+#endif
+
 // Invokable that holds match rule and handler to be called.
 template<typename F, typename M>
-struct OpCodeOperation
+struct X_EBO() OpCodeOperation : F
 {
-    /*[[no_unique_address]]*/ F op_;
     M match_;
 
-    constexpr bool operator()(std::uint16_t opcode) const
+    constexpr bool try_invoke(std::uint16_t opcode) &&
     {
         if (match_.check(opcode))
         {
-            match_.invoke(std::move(op_), opcode);
+            match_.invoke(std::move(static_cast<F&>(*this)), opcode);
             return true;
         }
         return false;
@@ -644,6 +656,14 @@ static_assert(not code(_, 0xb, 0xc, 0xd, [] {}).match_.check(0xaacd));
 static_assert(code(_, _, _, _, [] {}).match_.check(0xabcd));
 static_assert(code(_, _, _, _, [] {}).match_.check(0xffff));
 static_assert(code(_, _, _, 0xa, [] {}).match_.check(0xfffa));
+
+// Empty callback -> size of single code(...) should be 2 bytes
+// (same as std::uint16_t opcode).
+namespace examples_ { struct empty {}; }
+
+static_assert(sizeof(code(0xa, 0xb, 0xc, 0xd, examples_::empty())) == 2);
+static_assert(sizeof(code(_  , 0xb, 0xc, 0xd, examples_::empty())) == 2);
+static_assert(sizeof(code(_  , _n , 0xc, 0xd, examples_::empty())) == 2);
 #endif
 
 #if (X_HAS_CONCEPTS())
@@ -657,7 +677,7 @@ template<typename F, typename... Ops>
 void match_opcode(std::uint16_t opcode, F catch_all, Ops... ops)
 #endif
 {
-    const bool handled = (ops(opcode) || ...);
+    const bool handled = (std::move(ops).try_invoke(opcode) || ...);
     if (!handled)
     {
         catch_all();
@@ -665,6 +685,7 @@ void match_opcode(std::uint16_t opcode, F catch_all, Ops... ops)
 }
 
 #undef X_HAS_CONCEPTS
+#undef X_EBO
 
 #if defined(X_SAMPLES)
 #  undef X_SAMPLES
