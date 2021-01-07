@@ -191,16 +191,14 @@ void Chip8::execute_opcode(std::uint16_t opcode)
             cpu.V_[x] = overflow_add(cpu.V_[x], cpu.V_[y], cpu.V_[0xF]); })
         , code(0x8, _x, _y, 0x5, [](Chip8& cpu, std::uint8_t x, std::uint8_t y)
         { /* SUB Vx, Vy. */
-            cpu.V_[x] = overflow_sub(cpu.V_[x], cpu.V_[y], cpu.V_[0xF]);
-            cpu.V_[0xF] = ((cpu.V_[0xF] == 0) ? 1 : 0); })
+            cpu.V_[x] = overflow_sub(cpu.V_[x], cpu.V_[y], cpu.V_[0xF]); })
         , code(0x8, _x, _, 0x6, [](Chip8& cpu, std::uint8_t x)
         { /* SHR Vx {, Vy}. */
             cpu.V_[0xF] = cpu.V_[x] & 0x1;
             cpu.V_[x] >>= 1; })
         , code(0x8, _x, _y, 0x7, [](Chip8& cpu, std::uint8_t x, std::uint8_t y)
         { /* SUBN Vx, Vy. */
-            cpu.V_[x] = overflow_sub(cpu.V_[y], cpu.V_[x], cpu.V_[0xF]);
-            cpu.V_[0xF] = ((cpu.V_[0xF] == 0) ? 1 : 0); })
+            cpu.V_[x] = overflow_sub(cpu.V_[y], cpu.V_[x], cpu.V_[0xF]); })
         , code(0x8, _x, _, 0xE, [](Chip8& cpu, std::uint8_t x)
         { /* SHL Vx {, Vy}. */
             cpu.V_[0xF] = cpu.V_[x] & 0x80;
@@ -377,23 +375,15 @@ static std::uint8_t overflow_add(std::uint8_t lhs, std::uint8_t rhs
 {
     static_assert(sizeof(int) > sizeof(std::uint8_t));
     const int v = (lhs + rhs);
-    carry = ((v > 255) ? 1 : 0);
+    carry = ((v > 0xff) ? 1 : 0);
     return std::uint8_t(v);
 }
 
 static std::uint8_t overflow_sub(std::uint8_t lhs, std::uint8_t rhs
-    , std::uint8_t& borrow)
+    , std::uint8_t& no_borrow)
 {
-    if (lhs >= rhs)
-    {
-        borrow = 0;
-        return (lhs - rhs);
-    }
-    else // if (rhs > lhs)
-    {
-        borrow = 1;
-        return (rhs - lhs);
-    }
+    no_borrow = std::uint8_t(lhs >= rhs);
+    return std::uint8_t(lhs - rhs);
 }
 
 static std::uint8_t random_byte(std::random_device& rd)
