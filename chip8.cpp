@@ -346,6 +346,12 @@ bool Chip8::try_wait_any_key(std::uint8_t vindex)
 {
     if (keyboard_.is_any_pressed(V_[vindex]))
     {
+        // Mostly a hack: we "finished" waiting.
+        // If code/cpu tries to wait for any key
+        // again "too fast" (before our emulation
+        // resets state) we should not report that
+        // same key (any key) ready.
+        keyboard_.keys_ = 0;
         return false;
     }
 
@@ -380,7 +386,7 @@ static std::uint8_t random_byte(std::random_device& rd)
 // Render loop.
 #include <cstdlib>
 
-constexpr uint8_t kKeymap[] =
+constexpr int kKeymap[] =
 {
     SDLK_x, SDLK_1, SDLK_2, SDLK_3,
     SDLK_q, SDLK_w, SDLK_e, SDLK_a,
@@ -517,6 +523,10 @@ static void MainTick(void* data_ptr)
                     chip8->keyboard_.set_pressed(std::uint8_t(i));
                     if (chip8->waits_keyboard_)
                     {
+                        // Needs to be there to be sure we
+                        // didn't miss key press event.
+                        // (We can reset it in this while (SDL_PollEvent())
+                        // loop, see SDL_KEYUP below).
                         chip8->execute_cycle();
                     }
                     break;
@@ -556,10 +566,13 @@ static void MainTick(void* data_ptr)
 
     // Our tick is called at 60 Hz frequency
     // most of the time (Vsync is ON).
-    // Simulate CPU at (60 Hz * 10) = 600 Hz.
+    // Simulate CPU at (60 Hz * 9) = 540 Hz.
     // This is "unfair" since time between ticks
     // (execute_cycle()) is not uniform.
-    for (int i = 0; i < 10; ++i)
+    //
+    // Note: this makes "key pressed" to be true
+    // for at least 9 cycles.
+    for (int i = 0; i < 9; ++i)
     {
         if (chip8->waits_keyboard_)
         {
