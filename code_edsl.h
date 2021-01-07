@@ -695,9 +695,17 @@ template<typename User, typename F, typename... Ops>
 void match_opcode(User&& data, std::uint16_t opcode, F catch_all, Ops... ops)
 {
     const bool handled = (std::move(ops).try_invoke(data, opcode) || ...);
-    if (!handled)
+    if (handled)
+    {
+        return;
+    }
+    if constexpr (std::is_invocable_v<F, decltype(data)>)
     {
         catch_all(data);
+    }
+    else
+    {
+        catch_all();
     }
 }
 

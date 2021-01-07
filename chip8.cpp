@@ -6,6 +6,7 @@
 #include <span>
 
 #include <cstddef>
+#include <cmath>
 
 #include "code_edsl.h"
 
@@ -28,6 +29,16 @@ using namespace edsl;
 static constexpr std::uint8_t kDisplayWidth = 64;
 static constexpr std::uint8_t kDisplayHeight = 32;
 
+struct Keyboard
+{
+    std::uint16_t keys_ = 0; // 0-F (16) keys.
+
+    bool is_pressed(std::uint8_t index) const;
+    bool is_any_pressed(std::uint8_t& index) const;
+    void set_pressed(std::uint8_t index);
+    void clear_pressed(std::uint8_t index);
+};
+
 struct Chip8
 {
     std::uint8_t memory_[4 * 1024];
@@ -35,14 +46,14 @@ struct Chip8
     std::uint16_t stack_[16];   // Stack with `sp_`.
     std::uint16_t pc_;          // Program counter.
     std::uint16_t I_;           // Index register, 12 bits.
+    Keyboard keyboard_;
     std::uint8_t delay_timer_;  // Decremented at a rate of 60Hz.
     std::uint8_t sp_;           // Stack Pointer.
     std::uint8_t sound_timer_;  // Only one tone.
-    bool keys_[16];             // 0-F (16) keys.
     std::uint8_t display_memory_[kDisplayWidth][kDisplayHeight];
 
     std::random_device* rd_;
-    bool needs_redraw_;   // For "optimizations".
+    bool needs_redraw_;         // For "optimizations".
     bool waits_keyboard_;
 
     explicit Chip8(std::random_device& rd)
@@ -54,7 +65,7 @@ struct Chip8
         , delay_timer_(0)
         , sp_(0)
         , sound_timer_(0)
-        , keys_()
+        , keyboard_()
         , display_memory_()
         , rd_(&rd)
         , needs_redraw_(false)
@@ -72,7 +83,7 @@ struct Chip8
     bool draw(std::uint8_t x, std::uint8_t y
         , std::span<const std::uint8_t> sprite);
     void clear_display();
-    void wait_any_key(std::uint8_t vindex);
+    bool try_wait_any_key(std::uint8_t vindex);
     void execute_cycle();
     void execute_opcode(std::uint16_t opcode);
 };
@@ -125,135 +136,166 @@ void Chip8::execute_cycle()
 void Chip8::execute_opcode(std::uint16_t opcode)
 {
     match_opcode(*this, opcode
-        , [](Chip8&) { assert(false && "Unknown opcode."); }
-        , code(0x0, 0x0, 0xE, 0x0, [](Chip8& self)
+        , []() { assert(false && "Unknown opcode."); }
+        , code(0x0, 0x0, 0xE, 0x0, [](Chip8& cpu)
         { /*CLS*/
-            self.clear_display(); })
-        , code(0x0, 0x0, 0xE, 0xE, [](Chip8& self)
+            cpu.clear_display(); })
+        , code(0x0, 0x0, 0xE, 0xE, [](Chip8& cpu)
         { /*RET*/
-            assert(self.sp_ > 0);
-            --self.sp_;
-            assert(self.sp_ < std::size(self.stack_));
-            self.pc_ = self.stack_[self.sp_]; })
+            assert(cpu.sp_ > 0);
+            --cpu.sp_;
+            assert(cpu.sp_ < std::size(cpu.stack_));
+            cpu.pc_ = cpu.stack_[cpu.sp_]; })
         , code(0x0, _, _, _, []()
         { /* SYS addr. This instruction is only used on the old computers
             on which Chip-8 was originally implemented.
             It is ignored by modern interpreters. */ })
-        , code(0x1, _n, _n, _n, [](Chip8& self, std::uint16_t nnn)
+        , code(0x1, _n, _n, _n, [](Chip8& cpu, std::uint16_t nnn)
         { /* JP addr. */
-            self.pc_ = nnn; })
-        , code(0x2, _n, _n, _n, [](Chip8& self, std::uint16_t nnn)
+            cpu.pc_ = nnn; })
+        , code(0x2, _n, _n, _n, [](Chip8& cpu, std::uint16_t nnn)
         { /* CALL addr. */
-            assert(self.sp_ < std::size(self.stack_));
-            self.stack_[self.sp_] = self.pc_;
-            ++self.sp_;
-            self.pc_ = nnn; })
-        , code(0x3, _x, _k, _k, [](Chip8& self, std::uint8_t x, std::uint8_t kk)
+            assert(cpu.sp_ < std::size(cpu.stack_));
+            cpu.stack_[cpu.sp_] = cpu.pc_;
+            ++cpu.sp_;
+            cpu.pc_ = nnn; })
+        , code(0x3, _x, _k, _k, [](Chip8& cpu, std::uint8_t x, std::uint8_t kk)
         { /* SE Vx, byte. */
-            self.pc_ += ((self.V_[x] == kk) ? 2 : 0); })
-        , code(0x4, _x, _k, _k, [](Chip8& self, std::uint8_t x, std::uint8_t kk)
+            cpu.pc_ += ((cpu.V_[x] == kk) ? 2 : 0); })
+        , code(0x4, _x, _k, _k, [](Chip8& cpu, std::uint8_t x, std::uint8_t kk)
         { /* SNE Vx, byte. */
-            self.pc_ += ((self.V_[x] != kk) ? 2 : 0); })
-        , code(0x5, _x, _y, 0x0, [](Chip8& self, std::uint8_t x, std::uint8_t y)
+            cpu.pc_ += ((cpu.V_[x] != kk) ? 2 : 0); })
+        , code(0x5, _x, _y, 0x0, [](Chip8& cpu, std::uint8_t x, std::uint8_t y)
         { /* SE Vx, Vy. */
-            self.pc_ += ((self.V_[x] == self.V_[y]) ? 2 : 0); })
-        , code(0x6, _x, _k, _k, [](Chip8& self, std::uint8_t x, std::uint8_t kk)
+            cpu.pc_ += ((cpu.V_[x] == cpu.V_[y]) ? 2 : 0); })
+        , code(0x6, _x, _k, _k, [](Chip8& cpu, std::uint8_t x, std::uint8_t kk)
         { /* LD Vx, byte. */
-            self.V_[x] = kk; })
-        , code(0x7, _x, _k, _k, [](Chip8& self, std::uint8_t x, std::uint8_t kk)
+            cpu.V_[x] = kk; })
+        , code(0x7, _x, _k, _k, [](Chip8& cpu, std::uint8_t x, std::uint8_t kk)
         { /* ADD Vx, byte. */
-            self.V_[x] += kk; })
-        , code(0x8, _x, _y, 0x0, [](Chip8& self, std::uint8_t x, std::uint8_t y)
+            cpu.V_[x] += kk; })
+        , code(0x8, _x, _y, 0x0, [](Chip8& cpu, std::uint8_t x, std::uint8_t y)
         { /* LD Vx, Vy. */
-            self.V_[x] = self.V_[y]; })
-        , code(0x8, _x, _y, 0x1, [](Chip8& self, std::uint8_t x, std::uint8_t y)
+            cpu.V_[x] = cpu.V_[y]; })
+        , code(0x8, _x, _y, 0x1, [](Chip8& cpu, std::uint8_t x, std::uint8_t y)
         { /* OR Vx, Vy. */
-            self.V_[x] = self.V_[x] | self.V_[y]; })
-        , code(0x8, _x, _y, 0x2, [](Chip8& self, std::uint8_t x, std::uint8_t y)
+            cpu.V_[x] = cpu.V_[x] | cpu.V_[y]; })
+        , code(0x8, _x, _y, 0x2, [](Chip8& cpu, std::uint8_t x, std::uint8_t y)
         { /* AND Vx, Vy. */
-            self.V_[x] = self.V_[x] & self.V_[y]; })
-        , code(0x8, _x, _y, 0x3, [](Chip8& self, std::uint8_t x, std::uint8_t y)
+            cpu.V_[x] = cpu.V_[x] & cpu.V_[y]; })
+        , code(0x8, _x, _y, 0x3, [](Chip8& cpu, std::uint8_t x, std::uint8_t y)
         { /* XOR Vx, Vy. */
-            self.V_[x] = self.V_[x] ^ self.V_[y]; })
-        , code(0x8, _x, _y, 0x4, [](Chip8& self, std::uint8_t x, std::uint8_t y)
+            cpu.V_[x] = cpu.V_[x] ^ cpu.V_[y]; })
+        , code(0x8, _x, _y, 0x4, [](Chip8& cpu, std::uint8_t x, std::uint8_t y)
         { /* ADD Vx, Vy. */
-            self.V_[x] = overflow_add(self.V_[x], self.V_[y], self.V_[0xF]); })
-        , code(0x8, _x, _y, 0x5, [](Chip8& self, std::uint8_t x, std::uint8_t y)
+            cpu.V_[x] = overflow_add(cpu.V_[x], cpu.V_[y], cpu.V_[0xF]); })
+        , code(0x8, _x, _y, 0x5, [](Chip8& cpu, std::uint8_t x, std::uint8_t y)
         { /* SUB Vx, Vy. */
-            self.V_[x] = overflow_sub(self.V_[x], self.V_[y], self.V_[0xF]);
-            self.V_[0xF] = ((self.V_[0xF] == 0) ? 1 : 0); })
-        , code(0x8, _x, _, 0x6, [](Chip8& self, std::uint8_t x)
+            cpu.V_[x] = overflow_sub(cpu.V_[x], cpu.V_[y], cpu.V_[0xF]);
+            cpu.V_[0xF] = ((cpu.V_[0xF] == 0) ? 1 : 0); })
+        , code(0x8, _x, _, 0x6, [](Chip8& cpu, std::uint8_t x)
         { /* SHR Vx {, Vy}. */
-            self.V_[0xF] = self.V_[x] & 0x1;
-            self.V_[x] >>= 1; })
-        , code(0x8, _x, _y, 0x7, [](Chip8& self, std::uint8_t x, std::uint8_t y)
+            cpu.V_[0xF] = cpu.V_[x] & 0x1;
+            cpu.V_[x] >>= 1; })
+        , code(0x8, _x, _y, 0x7, [](Chip8& cpu, std::uint8_t x, std::uint8_t y)
         { /* SUBN Vx, Vy. */
-            self.V_[x] = overflow_sub(self.V_[y], self.V_[x], self.V_[0xF]);
-            self.V_[0xF] = ((self.V_[0xF] == 0) ? 1 : 0); })
-        , code(0x8, _x, _, 0xE, [](Chip8& self, std::uint8_t x)
+            cpu.V_[x] = overflow_sub(cpu.V_[y], cpu.V_[x], cpu.V_[0xF]);
+            cpu.V_[0xF] = ((cpu.V_[0xF] == 0) ? 1 : 0); })
+        , code(0x8, _x, _, 0xE, [](Chip8& cpu, std::uint8_t x)
         { /* SHL Vx {, Vy}. */
-            self.V_[0xF] = self.V_[x] & 0x80;
-            self.V_[x] <<= 1; })
-        , code(0x9, _x, _y, 0x0, [](Chip8& self, std::uint8_t x, std::uint8_t y)
+            cpu.V_[0xF] = cpu.V_[x] & 0x80;
+            cpu.V_[x] <<= 1; })
+        , code(0x9, _x, _y, 0x0, [](Chip8& cpu, std::uint8_t x, std::uint8_t y)
         { /* SNE Vx, Vy. */
-            self.pc_ += ((self.V_[x] != self.V_[y]) ? 2 : 0); })
-        , code(0xA, _n, _n, _n, [](Chip8& self, std::uint16_t nnn)
+            cpu.pc_ += ((cpu.V_[x] != cpu.V_[y]) ? 2 : 0); })
+        , code(0xA, _n, _n, _n, [](Chip8& cpu, std::uint16_t nnn)
         { /* LD I, addr. */
-            self.I_ = nnn; })
-        , code(0xB, _n, _n, _n, [](Chip8& self, std::uint16_t nnn)
+            cpu.I_ = nnn; })
+        , code(0xB, _n, _n, _n, [](Chip8& cpu, std::uint16_t nnn)
         { /* JP V0, addr. */
-            self.pc_ = std::uint16_t(nnn + self.V_[0]); })
-        , code(0xC, _x, _k, _k, [](Chip8& self, std::uint8_t x, std::uint8_t kk)
+            cpu.pc_ = std::uint16_t(nnn + cpu.V_[0]); })
+        , code(0xC, _x, _k, _k, [](Chip8& cpu, std::uint8_t x, std::uint8_t kk)
         { /* RND Vx, byte. */
-            self.V_[x] = random_byte(*self.rd_) & kk; })
-        , code(0xD, _x, _y, _n, [](Chip8& self, std::uint8_t x, std::uint8_t y, std::uint8_t n)
+            cpu.V_[x] = random_byte(*cpu.rd_) & kk; })
+        , code(0xD, _x, _y, _n, [](Chip8& cpu, std::uint8_t x, std::uint8_t y, std::uint8_t n)
         { /* DRW Vx, Vy, nibble. */
-            const bool off = self.draw(self.V_[x], self.V_[y]
-                , {self.memory_ + self.I_, n});
-            self.V_[0xF] = std::uint8_t(off);
-            self.needs_redraw_ = true; })
-        , code(0xE, _x, 0x9, 0xE, [](Chip8& self, std::uint8_t x)
+            const bool off = cpu.draw(cpu.V_[x], cpu.V_[y]
+                , {cpu.memory_ + cpu.I_, n});
+            cpu.V_[0xF] = std::uint8_t(off);
+            cpu.needs_redraw_ = true; })
+        , code(0xE, _x, 0x9, 0xE, [](Chip8& cpu, std::uint8_t x)
         { /* SKP Vx. */
-            self.pc_ += (self.keys_[self.V_[x]] ? 2 : 0); })
-        , code(0xE, _x, 0xA, 0x1, [](Chip8& self, std::uint8_t x)
+            const bool on = cpu.keyboard_.is_pressed(cpu.V_[x]);
+            cpu.pc_ += (on ? 2 : 0); })
+        , code(0xE, _x, 0xA, 0x1, [](Chip8& cpu, std::uint8_t x)
         { /* SKNP Vx. */
-            self.pc_ += (!self.keys_[self.V_[x]] ? 2 : 0); })
-        , code(0xF, _x, 0x0, 0x7, [](Chip8& self, std::uint8_t x)
+            const bool off = !cpu.keyboard_.is_pressed(cpu.V_[x]);
+            cpu.pc_ += (off ? 2 : 0); })
+        , code(0xF, _x, 0x0, 0x7, [](Chip8& cpu, std::uint8_t x)
         { /* LD Vx, DT. */
-            self.V_[x] = self.delay_timer_; })
-        , code(0xF, _x, 0x0, 0xA, [](Chip8& self, std::uint8_t x)
+            cpu.V_[x] = cpu.delay_timer_; })
+        , code(0xF, _x, 0x0, 0xA, [](Chip8& cpu, std::uint8_t x)
         { /* LD Vx, K. */
-            self.wait_any_key(x); })
-        , code(0xF, _x, 0x1, 0x5, [](Chip8& self, std::uint8_t x)
+            cpu.waits_keyboard_ = cpu.try_wait_any_key(x); })
+        , code(0xF, _x, 0x1, 0x5, [](Chip8& cpu, std::uint8_t x)
         { /* LD DT, Vx. */
-            self.delay_timer_ = self.V_[x]; })
-        , code(0xF, _x, 0x1, 0x8, [](Chip8& self, std::uint8_t x)
+            cpu.delay_timer_ = cpu.V_[x]; })
+        , code(0xF, _x, 0x1, 0x8, [](Chip8& cpu, std::uint8_t x)
         { /* LD ST, Vx. */
-            self.sound_timer_ = self.V_[x]; })
-        , code(0xF, _x, 0x1, 0xE, [](Chip8& self, std::uint8_t x)
+            cpu.sound_timer_ = cpu.V_[x]; })
+        , code(0xF, _x, 0x1, 0xE, [](Chip8& cpu, std::uint8_t x)
         { /* ADD I, Vx. */
-            self.I_ += self.V_[x]; })
-        , code(0xF, _x, 0x2, 0x9, [](Chip8& self, std::uint8_t x)
+            cpu.I_ += cpu.V_[x]; })
+        , code(0xF, _x, 0x2, 0x9, [](Chip8& cpu, std::uint8_t x)
         { /* LD F, Vx. */
             const auto sprite_bytes = (std::size(kHexDigitsSprites) / 16);
-            self.I_ = std::uint16_t(self.V_[x] * sprite_bytes); })
-        , code(0xF, _x, 0x3, 0x3, [](Chip8& self, std::uint8_t x)
+            cpu.I_ = std::uint16_t(cpu.V_[x] * sprite_bytes); })
+        , code(0xF, _x, 0x3, 0x3, [](Chip8& cpu, std::uint8_t x)
         { /* LD B, Vx. */
-            std::uint8_t* ptr = (self.memory_ + self.I_);
-            ptr[0] = (self.V_[x] / 100);
-            ptr[1] = (self.V_[x] / 10) % 10;
-            ptr[2] = (self.V_[x] % 100) % 10; })
-        , code(0xF, _x, 0x5, 0x5, [](Chip8& self, std::uint8_t x)
+            std::uint8_t* ptr = (cpu.memory_ + cpu.I_);
+            ptr[0] = (cpu.V_[x] / 100);
+            ptr[1] = (cpu.V_[x] / 10) % 10;
+            ptr[2] = (cpu.V_[x] % 100) % 10; })
+        , code(0xF, _x, 0x5, 0x5, [](Chip8& cpu, std::uint8_t x)
         { /* LD [I], Vx. */
-            std::copy(self.V_, self.V_ + x + 1
-                , self.memory_ + self.I_); })
-        , code(0xF, _x, 0x6, 0x5, [](Chip8& self, std::uint8_t x)
+            std::copy(cpu.V_, cpu.V_ + x + 1
+                , cpu.memory_ + cpu.I_); })
+        , code(0xF, _x, 0x6, 0x5, [](Chip8& cpu, std::uint8_t x)
         { /* LD Vx, [I]. */
-            std::copy(self.memory_ + self.I_, self.memory_ + self.I_ + x + 1
-                , self.V_); })
+            std::copy(cpu.memory_ + cpu.I_, cpu.memory_ + cpu.I_ + x + 1
+                , cpu.V_); })
         );
 
     assert(pc_ < std::size(memory_));
+}
+
+bool Keyboard::is_pressed(std::uint8_t index) const
+{
+    assert(index < 16);
+    return bool((keys_ >> index) & 0x1u);
+}
+
+void Keyboard::set_pressed(std::uint8_t index)
+{
+    assert(index < 16);
+    keys_ |= std::uint16_t(0x1u << index);
+}
+
+void Keyboard::clear_pressed(std::uint8_t index)
+{
+    assert(index < 16);
+    keys_ &= std::uint16_t(~(0x1u << index));
+}
+
+bool Keyboard::is_any_pressed(std::uint8_t& index) const
+{
+    if (keys_ != 0)
+    {
+        // rightmost set bit.
+        index = std::uint8_t(std::log2(keys_ & -keys_));
+        return true;
+    }
+    return false;
 }
 
 template<typename T, typename ReduceOp, typename TransformOp>
@@ -278,7 +320,7 @@ bool Chip8::draw(std::uint8_t x, std::uint8_t y
     auto bit_at = [](std::uint8_t value, std::uint8_t index)
     {
         assert(index < 8);
-        return std::uint8_t((value >> (7 - index)) & 0x01u);
+        return std::uint8_t((value >> (8 - (index + 1))) & 0x01u);
     };
 
     struct DrawInput
@@ -294,7 +336,7 @@ bool Chip8::draw(std::uint8_t x, std::uint8_t y
         std::uint8_t& now = display_memory_[input.x][input.y];
         std::uint8_t old = now;
         now ^= input.new_pixel;
-        return (already_off || ((now == 0) && (old == 1)));
+        return (already_off || (!now && old));
     }
         , [&](std::uint8_t r, std::uint8_t c)
     {
@@ -319,18 +361,15 @@ void Chip8::clear_display()
         , std::uint8_t(0));
 }
 
-void Chip8::wait_any_key(std::uint8_t vindex)
+bool Chip8::try_wait_any_key(std::uint8_t vindex)
 {
-    pc_ -= 2; // busy wait.
-    waits_keyboard_ = true;
-    auto it = std::find(std::cbegin(keys_), std::cend(keys_), true);
-    if (it == std::cend(keys_))
+    if (keyboard_.is_any_pressed(V_[vindex]))
     {
-        return;
+        return false;
     }
-    V_[vindex] = std::uint8_t(it - std::cbegin(keys_));
-    pc_ += 2;
-    waits_keyboard_ = false;
+
+    pc_ -= 2; // busy wait.
+    return true;
 }
 
 static std::uint8_t overflow_add(std::uint8_t lhs, std::uint8_t rhs
@@ -375,6 +414,7 @@ constexpr uint8_t kKeymap[] =
     SDLK_s, SDLK_d, SDLK_z, SDLK_c,
     SDLK_4, SDLK_r, SDLK_f, SDLK_v,
 };
+static_assert(std::size(kKeymap) == 16);
 
 static bool ReadAllFileAsBinary(const char* filepath
     , std::span<std::uint8_t> buffer)
@@ -495,7 +535,7 @@ static void MainTick(void* data_ptr)
             {
                 if (e.key.keysym.sym == kKeymap[i])
                 {
-                    chip8->keys_[i] = true;
+                    chip8->keyboard_.set_pressed(std::uint8_t(i));
                     if (chip8->waits_keyboard_)
                     {
                         chip8->execute_cycle();
@@ -509,7 +549,7 @@ static void MainTick(void* data_ptr)
             {
                 if (e.key.keysym.sym == kKeymap[i])
                 {
-                    chip8->keys_[i] = false;
+                    chip8->keyboard_.clear_pressed(std::uint8_t(i));
                     break;
                 }
             }
