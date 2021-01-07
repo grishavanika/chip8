@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <numeric>
+#include <memory>
+#include <string>
 #include <random>
 #include <span>
 
@@ -206,9 +208,9 @@ void Chip8::execute_opcode(std::uint16_t opcode)
             self.V_[x] = random_byte(*self.rd_) & kk; })
         , code(0xD, _x, _y, _n, [](Chip8& self, std::uint8_t x, std::uint8_t y, std::uint8_t n)
         { /* DRW Vx, Vy, nibble. */
-            const bool collision = self.draw(self.V_[x], self.V_[y]
+            const bool off = self.draw(self.V_[x], self.V_[y]
                 , {self.memory_ + self.I_, n});
-            self.V_[0xF] = (collision ? 1 : 0);
+            self.V_[0xF] = std::uint8_t(off);
             self.needs_redraw_ = true; })
         , code(0xE, _x, 0x9, 0xE, [](Chip8& self, std::uint8_t x)
         { /* SKP Vx. */
@@ -287,16 +289,12 @@ bool Chip8::draw(std::uint8_t x, std::uint8_t y
     };
 
     return outer_index_product(std::uint8_t(sprite.size()), 8, false
-        , [this](bool prev, DrawInput input)
+        , [this](bool already_off, DrawInput input)
     {
-        std::uint8_t& old_pixel = display_memory_[input.x][input.y];
-        bool collision = false;
-        if (input.new_pixel == 1)
-        {
-            collision = (old_pixel == 1);
-            old_pixel = (input.new_pixel ^ old_pixel);
-        }
-        return (prev || collision);
+        std::uint8_t& now = display_memory_[input.x][input.y];
+        std::uint8_t old = now;
+        now ^= input.new_pixel;
+        return (already_off || ((now == 0) && (old == 1)));
     }
         , [&](std::uint8_t r, std::uint8_t c)
     {
@@ -447,9 +445,28 @@ static void AbortOnSDLError(const void* resource)
     }
 }
 
+const char* kKnownROMs[] = {
+    "WIPEOFF", "15PUZZLE", "BLINKY", "BLITZ", "BRIX", "CONNECT4", "GUESS", "HIDDEN",
+    "INVADERS", "KALEID", "MAZE", "MERLIN", "MISSILE", "PONG", "PONG2", "PUZZLE",
+    "SYZYGY", "TANK", "TETRIS", "TICTAC", "UFO", "VBRIX", "VERS", "IBM"};
+
+static std::unique_ptr<Chip8> LoadKnownROM(std::random_device& rd, std::size_t index)
+{
+    auto chip8 = std::make_unique<Chip8>(rd);
+    chip8->boot_up();
+
+    const char* const name = kKnownROMs[index % std::size(kKnownROMs)];
+    const bool ok = ReadAllFileAsBinary((std::string("roms/") + name).c_str()
+        , {chip8->memory_ + chip8->pc_, (std::size(chip8->memory_) - chip8->pc_)});
+    assert(ok);
+    return chip8;
+}
+
 struct TickData
 {
-    Chip8& chip8_;
+    std::random_device* rd_ = nullptr;
+    std::unique_ptr<Chip8> chip8_;
+    std::size_t rom_index_ = 0;
     // Leak all resources intentionally.
     SDL_Renderer* renderer_ = nullptr;
     SDL_Texture* picture_ = nullptr;
@@ -460,8 +477,10 @@ struct TickData
 static void MainTick(void* data_ptr)
 {
     TickData* data = static_cast<TickData*>(data_ptr);
-    Chip8& chip8 = data->chip8_;
     SDL_Renderer* renderer = data->renderer_;
+    Chip8* chip8 = data->chip8_.get();
+    assert(chip8);
+    std::size_t old_rom_index = data->rom_index_;
 
     SDL_Event e{};
     while (SDL_PollEvent(&e))
@@ -476,10 +495,10 @@ static void MainTick(void* data_ptr)
             {
                 if (e.key.keysym.sym == kKeymap[i])
                 {
-                    chip8.keys_[i] = true;
-                    if (chip8.waits_keyboard_)
+                    chip8->keys_[i] = true;
+                    if (chip8->waits_keyboard_)
                     {
-                        chip8.execute_cycle();
+                        chip8->execute_cycle();
                     }
                     break;
                 }
@@ -490,7 +509,7 @@ static void MainTick(void* data_ptr)
             {
                 if (e.key.keysym.sym == kKeymap[i])
                 {
-                    chip8.keys_[i] = false;
+                    chip8->keys_[i] = false;
                     break;
                 }
             }
@@ -498,8 +517,22 @@ static void MainTick(void* data_ptr)
             {
                 data->quit_ = true;
             }
+            if (e.key.keysym.sym == SDLK_RIGHT)
+            {
+                ++data->rom_index_;
+            }
+            if (e.key.keysym.sym == SDLK_LEFT)
+            {
+                --data->rom_index_;
+            }
             break;
         }
+    }
+
+    if (old_rom_index != data->rom_index_)
+    {
+        data->chip8_ = LoadKnownROM(*data->rd_, data->rom_index_);
+        chip8 = data->chip8_.get();
     }
 
     // Our tick is called at 60 Hz frequency
@@ -509,20 +542,20 @@ static void MainTick(void* data_ptr)
     // (execute_cycle()) is not uniform.
     for (int i = 0; i < 10; ++i)
     {
-        if (chip8.waits_keyboard_)
+        if (chip8->waits_keyboard_)
         {
             break;
         }
-        chip8.execute_cycle();
+        chip8->execute_cycle();
     }
     
-    if (std::exchange(chip8.needs_redraw_, false))
+    if (std::exchange(chip8->needs_redraw_, false))
     {
         for (int r = 0; r < kDisplayWidth; ++r)
         {
             for (int c = 0; c < kDisplayHeight; ++c)
             {
-                const std::uint8_t on = chip8.display_memory_[r][c];
+                const std::uint8_t on = chip8->display_memory_[r][c];
                 const auto index = (r + c * kDisplayWidth);
                 data->pixels_[index] = (on ? 0xff33ff66 : 0xff000000);
             }
@@ -595,16 +628,9 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
     AbortOnSDLError(picture);
 
     std::uint32_t pixels[kDisplayWidth * kDisplayHeight]{};
-
     std::random_device rd;
-    Chip8 chip8(rd);
-    chip8.boot_up();
-
-    const bool read = ReadAllFileAsBinary(R"(roms/WIPEOFF)"
-        , {chip8.memory_ + chip8.pc_, (std::size(chip8.memory_) - chip8.pc_)});
-    assert(read);
-
-    TickData data{chip8, renderer, picture, pixels};
+    auto chip8 = LoadKnownROM(rd, 0);
+    TickData data{&rd, std::move(chip8), 0, renderer, picture, pixels};
     MainLoop(data);
 
     return 0;
