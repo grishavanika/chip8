@@ -135,7 +135,7 @@ void Chip8::execute_opcode(std::uint16_t opcode)
             --self.sp_;
             assert(self.sp_ < std::size(self.stack_));
             self.pc_ = self.stack_[self.sp_]; })
-        , code(0x0, _n, _n, _n, [](Chip8&, std::uint16_t)
+        , code(0x0, _, _, _, []()
         { /* SYS addr. This instruction is only used on the old computers
             on which Chip-8 was originally implemented.
             It is ignored by modern interpreters. */ })

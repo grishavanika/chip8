@@ -398,6 +398,9 @@ static_assert(
         , std::uint16_t(0x0bcd)));
 #endif
 
+template<typename>
+constexpr bool always_false = false;
+
 // The main part of this file.
 // Helper that is parametrized by 4 types -
 // all 4 parameters from code(...) function.
@@ -543,7 +546,28 @@ struct Match
     template<typename F, typename User>
     constexpr void invoke(F&& f, User&& data, std::uint16_t opcode) const
     {
-        (void)std::apply(std::forward<F>(f)
+        auto call = [f_ = std::forward<F>(f)](auto&& data, auto... args)
+        {
+            if constexpr (std::is_invocable_v<decltype(f_)
+                , decltype(data), decltype(args)...>)
+            { // F(User&, ...) with user data.
+                (void)f_(data, args...);
+            }
+            else if constexpr (std::is_invocable_v<decltype(f_)
+                , decltype(args)...>)
+            { // F(...) with NO user data.
+                (void)f_(args...);
+            }
+            else
+            { // Signature mismatch.
+                []<bool false_always = false>() // Yet-another C++ hack.
+                {
+                    static_assert(false_always, "Callable does not match pattern.");
+                }();
+            }
+        };
+
+        std::apply(std::move(call)
             , std::tuple_cat(std::forward_as_tuple(std::forward<User>(data))
                 , as_arguments_tuple<FinalArgsMetadata>(opcode)));
     }
