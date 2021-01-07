@@ -1,14 +1,14 @@
+#include "code_edsl.h"
+
 #include <algorithm>
 #include <numeric>
 #include <memory>
-#include <string>
 #include <random>
+#include <chrono>
 #include <span>
 
 #include <cstddef>
 #include <cmath>
-
-#include "code_edsl.h"
 
 #include <SDL2/SDL.h>
 
@@ -17,14 +17,10 @@
 #endif
 #include <cassert>
 
-using namespace edsl;
-
-// ROMS:
-// https://github.com/ColinEberhardt/wasm-rust-chip8/tree/master/web/roms
-// Docs:
 // http://devernay.free.fr/hacks/chip8/C8TECH10.HTM
-// https://github.com/JamesGriffin/CHIP-8-Emulator
 // https://blog.scottlogic.com/2017/12/13/chip8-emulator-webassembly-rust.html
+
+using namespace edsl;
 
 static constexpr std::uint8_t kDisplayWidth = 64;
 static constexpr std::uint8_t kDisplayHeight = 32;
@@ -39,40 +35,28 @@ struct Keyboard
     void clear_pressed(std::uint8_t index);
 };
 
+// 60 * 1 tick = 1 second.
+using Tick60Hz = std::chrono::duration<float, std::ratio<1, 60>>;
+
 struct Chip8
 {
-    std::uint8_t memory_[4 * 1024];
-    std::uint8_t V_[16];        // Vx, where x is [0; F]. VF should not be used.
-    std::uint16_t stack_[16];   // Stack with `sp_`.
-    std::uint16_t pc_;          // Program counter.
-    std::uint16_t I_;           // Index register, 12 bits.
-    Keyboard keyboard_;
-    std::uint8_t delay_timer_;  // Decremented at a rate of 60Hz.
-    std::uint8_t sp_;           // Stack Pointer.
-    std::uint8_t sound_timer_;  // Only one tone.
-    std::uint8_t display_memory_[kDisplayWidth][kDisplayHeight];
+    std::uint8_t memory_[4 * 1024]{};
+    std::uint8_t V_[16]{};        // Vx, where x is [0; F]. VF should not be used.
+    std::uint16_t stack_[16]{};   // Stack with `sp_`.
+    std::uint16_t pc_{0};          // Program counter.
+    std::uint16_t I_{0};           // Index register, 12 bits.
+    Keyboard keyboard_{};
+    std::uint8_t delay_timer_{0};  // Decremented at a rate of 60Hz.
+    std::uint8_t sp_{0};           // Stack Pointer.
+    std::uint8_t sound_timer_{0};  // Only one tone.
+    std::uint8_t display_memory_[kDisplayWidth][kDisplayHeight]{};
 
-    std::random_device* rd_;
-    bool needs_redraw_;         // For "optimizations".
-    bool waits_keyboard_;
+    std::random_device* rd_{nullptr};
+    bool needs_redraw_{false};         // For "optimizations".
+    bool waits_keyboard_{false};
+    std::chrono::high_resolution_clock::time_point last_tick_{};
 
-    explicit Chip8(std::random_device& rd)
-        : memory_()
-        , V_()
-        , stack_()
-        , pc_(0)
-        , I_(0)
-        , delay_timer_(0)
-        , sp_(0)
-        , sound_timer_(0)
-        , keyboard_()
-        , display_memory_()
-        , rd_(&rd)
-        , needs_redraw_(false)
-        , waits_keyboard_(false)
-    {
-    }
-
+    Chip8() = default;
     ~Chip8() = default;
     Chip8(const Chip8&) = delete;
     Chip8& operator=(const Chip8&) = delete;
@@ -116,21 +100,19 @@ static std::uint8_t random_byte(std::random_device& rd);
 
 void Chip8::execute_cycle()
 {
+    const auto now = std::chrono::high_resolution_clock::now();
+    const float elapsed_ticks = std::chrono::duration_cast<Tick60Hz>(now - last_tick_).count();
+    if (elapsed_ticks >= 1.f)
+    {
+        last_tick_ = now;
+    }
+    delay_timer_ -= std::uint8_t(std::min<unsigned>(delay_timer_, unsigned(elapsed_ticks)));
+    sound_timer_ -= std::uint8_t(std::min<unsigned>(sound_timer_, unsigned(elapsed_ticks)));
+
     const std::uint16_t opcode = std::uint16_t(
         (memory_[pc_] << 8) | (memory_[pc_ + 1]));
-    
     pc_ += 2;
     execute_opcode(opcode);
-
-    // Note: wrong. Should be decreased at 60 Hz speed.
-    if (delay_timer_ > 0)
-    {
-        --delay_timer_;
-    }
-    if (sound_timer_ > 0)
-    {
-        --sound_timer_;
-    }
 }
 
 void Chip8::execute_opcode(std::uint16_t opcode)
@@ -350,6 +332,7 @@ void Chip8::boot_up()
     pc_ = 0x200;
     needs_redraw_ = true;
     std::copy(std::begin(kHexDigitsSprites), std::end(kHexDigitsSprites), memory_);
+    last_tick_ = std::chrono::high_resolution_clock::now();
 }
 
 void Chip8::clear_display()
@@ -475,18 +458,24 @@ static void AbortOnSDLError(const void* resource)
     }
 }
 
-const char* kKnownROMs[] = {
-    "WIPEOFF", "15PUZZLE", "BLINKY", "BLITZ", "BRIX", "CONNECT4", "GUESS", "HIDDEN",
-    "INVADERS", "KALEID", "MAZE", "MERLIN", "MISSILE", "PONG", "PONG2", "PUZZLE",
-    "SYZYGY", "TANK", "TETRIS", "TICTAC", "UFO", "VBRIX", "VERS", "IBM"};
+static const char* kKnownROMs[] =
+{
+    "roms/WIPEOFF",  "roms/15PUZZLE", "roms/BLINKY", "roms/BLITZ",
+    "roms/BRIX",     "roms/CONNECT4", "roms/GUESS",  "roms/HIDDEN",
+    "roms/INVADERS", "roms/KALEID",   "roms/MAZE",   "roms/MERLIN",
+    "roms/MISSILE",  "roms/PONG",     "roms/PONG2",  "roms/PUZZLE",
+    "roms/SYZYGY",   "roms/TANK",     "roms/TETRIS", "roms/TICTAC",
+    "roms/UFO",      "roms/VBRIX",    "roms/VERS",   "roms/IBM"
+};
 
 static std::unique_ptr<Chip8> LoadKnownROM(std::random_device& rd, std::size_t index)
 {
-    auto chip8 = std::make_unique<Chip8>(rd);
+    std::unique_ptr<Chip8> chip8(new Chip8{});
+    chip8->rd_ = &rd;
     chip8->boot_up();
 
-    const char* const name = kKnownROMs[index % std::size(kKnownROMs)];
-    const bool ok = ReadAllFileAsBinary((std::string("roms/") + name).c_str()
+    const char* const path = kKnownROMs[index % std::size(kKnownROMs)];
+    const bool ok = ReadAllFileAsBinary(path
         , {chip8->memory_ + chip8->pc_, (std::size(chip8->memory_) - chip8->pc_)});
     assert(ok);
     return chip8;
@@ -610,7 +599,7 @@ static void MainLoop(TickData& data)
 {
     emscripten_set_main_loop_arg(&MainTick
         , &data
-        , -1  // use whatever FPS browser needs
+        , 60
         , 1); // simulate infinite loop. Don't destroy objects on stack (?)
 }
 

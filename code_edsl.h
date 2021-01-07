@@ -1,9 +1,11 @@
 #pragma once
 #include <type_traits>
+#include <utility>
 #include <tuple>
 #include <bit>
 
 #include <cstdint>
+#include <climits>
 #include <cassert>
 
 #if (__EMSCRIPTEN__)
@@ -397,9 +399,6 @@ static_assert(
           std::uint8_t (0x000a)
         , std::uint16_t(0x0bcd)));
 #endif
-
-template<typename>
-constexpr bool always_false = false;
 
 // The main part of this file.
 // Helper that is parametrized by 4 types -
