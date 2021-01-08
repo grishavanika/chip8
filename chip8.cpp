@@ -11,6 +11,7 @@
 #include <cmath>
 
 #include <SDL2/SDL.h>
+#include <SDL2/SDL2_gfxPrimitives.h>
 
 #if defined(NDEBUG)
 #  undef NDEBUG
@@ -487,6 +488,17 @@ static std::unique_ptr<Chip8> LoadKnownROM(std::random_device& rd, std::size_t i
     return chip8;
 }
 
+static constexpr int kRenderWidth = kDisplayWidth * 10;   // 640
+static constexpr int kRenderHeight = kDisplayHeight * 10; // 320
+
+static_assert((16 == std::size(kKeymap))
+    && (16 == (sizeof(Keyboard::keys_) * CHAR_BIT))
+    , "Keyboard rendering assumes 16 hex keys that form 4x4 grid");
+
+static constexpr int kRenderKeySize = 50;
+static constexpr int kRenderLineWidth = 2;
+static constexpr int kRenderKeysWidth = kRenderKeySize * 4 + kRenderLineWidth * (4 + 1);
+
 struct TickData
 {
     std::random_device* rd_ = nullptr;
@@ -497,7 +509,62 @@ struct TickData
     SDL_Texture* picture_ = nullptr;
     std::uint32_t* pixels_ = nullptr;
     bool quit_ = false;
+    SDL_Texture* keyboard_ = nullptr;
 };
+
+static void RenderKeyboard(SDL_Renderer* renderer, SDL_Texture* texture
+    , const Keyboard& chip8_keys)
+{
+    AbortOnSDLError(SDL_SetRenderTarget(renderer, texture));
+    AbortOnSDLError(SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xff));
+    AbortOnSDLError(SDL_RenderClear(renderer));
+
+    AbortOnSDLError(SDL_SetRenderDrawColor(renderer, 0xff, 0, 0, 0xff));
+    constexpr int kYOffset = kRenderHeight - 4 * kRenderKeySize - kRenderLineWidth;
+    for (int i = 0; i < (4 + 1); ++i)
+    {
+        // + 1 pixel because it seems SDL is off by one when
+        // doing SDL_RenderCopy().
+        thickLineRGBA(renderer
+            , Sint16(i * kRenderKeySize + (i * kRenderLineWidth) + 1)
+            , Sint16(kYOffset)
+            , Sint16(i * kRenderKeySize + (i * kRenderLineWidth) + 1)
+            , Sint16(kRenderHeight)
+            , Uint8(kRenderLineWidth)
+            , 0xff, 0x0, 0x0, 0xff);
+
+        thickLineRGBA(renderer
+            , Sint16(0)
+            , Sint16(i * kRenderKeySize + kYOffset + 1)
+            , Sint16(kRenderKeysWidth)
+            , Sint16(i * kRenderKeySize + kYOffset + 1)
+            , Uint8(kRenderLineWidth)
+            , 0xff, 0x0, 0x0, 0xff);
+    }
+
+    for (std::uint8_t x = 0; x < 4; ++x)
+    {
+        for (std::uint8_t y = 0; y < 4; ++y)
+        {
+            const std::uint8_t key_id = std::uint8_t(x + y * 4);
+            if (!chip8_keys.is_pressed(key_id))
+            {
+                continue;
+            }
+            const SDL_Rect key_rect =
+            {
+                  x * kRenderKeySize + ((x + 1) * kRenderLineWidth)
+                , y * kRenderKeySize + kRenderLineWidth + kYOffset
+                , kRenderKeySize
+                , kRenderKeySize - kRenderLineWidth
+            };
+            AbortOnSDLError(SDL_SetRenderDrawColor(renderer, 0xff, 0xff, 0xff, 0xff));
+            AbortOnSDLError(SDL_RenderFillRect(renderer, &key_rect));
+        }
+    }
+
+    AbortOnSDLError(SDL_SetRenderTarget(renderer, nullptr/*reset to default*/));
+}
 
 static void MainTick(void* data_ptr)
 {
@@ -558,6 +625,8 @@ static void MainTick(void* data_ptr)
         chip8 = data->chip8_.get();
     }
 
+    RenderKeyboard(renderer, data->keyboard_, chip8->keyboard_);
+
     // Our tick is called at 60 Hz frequency
     // most of the time (Vsync is ON).
     // Simulate CPU at (60 Hz * 9) = 540 Hz.
@@ -595,7 +664,14 @@ static void MainTick(void* data_ptr)
 
     AbortOnSDLError(SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xff));
     AbortOnSDLError(SDL_RenderClear(renderer));
-    AbortOnSDLError(SDL_RenderCopy(renderer, data->picture_, nullptr, nullptr));
+    {
+        SDL_Rect dest{0, 0, kRenderWidth, kRenderHeight};
+        AbortOnSDLError(SDL_RenderCopy(renderer, data->picture_, nullptr, &dest));
+    }
+    {
+        SDL_Rect dest{kRenderWidth, 0, kRenderKeysWidth, kRenderHeight};
+        AbortOnSDLError(SDL_RenderCopy(renderer, data->keyboard_, nullptr, &dest));
+    }
     SDL_RenderPresent(renderer);
 }
 
@@ -637,8 +713,8 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
         "Chip8 Emulator" // title
         , SDL_WINDOWPOS_CENTERED // x position
         , SDL_WINDOWPOS_CENTERED // y position
-        , kDisplayWidth * 10
-        , kDisplayHeight * 10
+        , kRenderWidth + kRenderKeysWidth
+        , kRenderHeight
         , SDL_WINDOW_SHOWN | SDL_WINDOW_BORDERLESS);
     AbortOnSDLError(window);
     SDL_Renderer* renderer = SDL_CreateRenderer(
@@ -653,10 +729,17 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
         kDisplayWidth, kDisplayHeight);
     AbortOnSDLError(picture);
 
+    SDL_Texture* keyboard = SDL_CreateTexture(renderer,
+        SDL_PIXELFORMAT_ARGB8888,
+        SDL_TEXTUREACCESS_TARGET,
+        kRenderKeysWidth, kRenderHeight);
+    AbortOnSDLError(keyboard);
+
     std::uint32_t pixels[kDisplayWidth * kDisplayHeight]{};
     std::random_device rd;
     auto chip8 = LoadKnownROM(rd, 0);
     TickData data{&rd, std::move(chip8), 0, renderer, picture, pixels};
+    data.keyboard_ = keyboard;
     MainLoop(data);
 
     return 0;
