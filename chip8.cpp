@@ -617,6 +617,7 @@ static void RenderKeyboard(SDL_Renderer* renderer
             rect.y += (((kRenderKeySize - kRenderLineWidth) - rect.h) / 2);
             AbortOnSDLError(SDL_SetRenderTarget(renderer, texture));
             AbortOnSDLError(SDL_RenderCopy(renderer, text, nullptr, &rect));
+            SDL_DestroyTexture(text);
         }
     }
 
