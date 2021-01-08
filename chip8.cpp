@@ -521,14 +521,8 @@ static void MainTick(void* data_ptr)
                 if (e.key.keysym.sym == kKeymap[i])
                 {
                     chip8->keyboard_.set_pressed(std::uint8_t(i));
-                    if (chip8->waits_keyboard_)
-                    {
-                        // Needs to be there to be sure we
-                        // didn't miss key press event.
-                        // (We can reset it in this while (SDL_PollEvent())
-                        // loop, see SDL_KEYUP below).
-                        chip8->execute_cycle();
-                    }
+                    // Make sure we'll tick CPU.
+                    chip8->waits_keyboard_ = false;
                     break;
                 }
             }
