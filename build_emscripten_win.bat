@@ -29,7 +29,7 @@ echo Building ...
 call emcc chip8.cpp ^
 	-O2 ^
 	-s USE_SDL=2 ^
-	--embed-file roms ^
+	--embed-file assets ^
 	-DNDEBUG ^
 	-std=c++20 ^
 	-o chip8_win.js

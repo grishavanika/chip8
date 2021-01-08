@@ -6,12 +6,14 @@
 #include <random>
 #include <chrono>
 #include <span>
+#include <string>
 
 #include <cstddef>
 #include <cmath>
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL2_gfxPrimitives.h>
+#include <SDL2/SDL_ttf.h>
 
 #if defined(NDEBUG)
 #  undef NDEBUG
@@ -387,24 +389,30 @@ static std::uint8_t random_byte(std::random_device& rd)
 // Render loop.
 #include <cstdlib>
 
-constexpr int kKeymap[] =
+struct KeyInfo
 {
-    SDLK_x, SDLK_1, SDLK_2, SDLK_3,
-    SDLK_q, SDLK_w, SDLK_e, SDLK_a,
-    SDLK_s, SDLK_d, SDLK_z, SDLK_c,
-    SDLK_4, SDLK_r, SDLK_f, SDLK_v,
+    const int code;
+    const char* const title;
+};
+
+static constexpr KeyInfo kKeymap[] =
+{
+      {SDLK_x, "0 (X)"}, {SDLK_1, "1 (1)"}, {SDLK_2, "2 (2)"}, {SDLK_3, "3 (3)"}
+    , {SDLK_q, "4 (Q)"}, {SDLK_w, "5 (W)"}, {SDLK_e, "6 (E)"}, {SDLK_a, "7 (A)"}
+    , {SDLK_s, "8 (S)"}, {SDLK_d, "9 (D)"}, {SDLK_z, "A (Z)"}, {SDLK_c, "B (C)"}
+    , {SDLK_4, "C (4)"}, {SDLK_r, "D (R)"}, {SDLK_f, "E (F)"}, {SDLK_v, "F (V)"}
 };
 static_assert(std::size(kKeymap) == 16);
 
-static bool ReadAllFileAsBinary(const char* filepath
+static bool ReadAllFileAsBinary(std::string filepath
     , std::span<std::uint8_t> buffer)
 {
 #if (_MSC_VER)
     FILE* f = nullptr;
-    const errno_t e = fopen_s(&f, filepath, "rb");
+    const errno_t e = fopen_s(&f, filepath.c_str(), "rb");
     (void)e;
 #else
-    FILE* const f = fopen(filepath, "rb");
+    FILE* const f = fopen(filepath.c_str(), "rb");
 #endif
     if (!f)
     {
@@ -467,12 +475,12 @@ static void AbortOnSDLError(const void* resource)
 
 static const char* kKnownROMs[] =
 {
-    "roms/WIPEOFF",  "roms/15PUZZLE", "roms/BLINKY", "roms/BLITZ",
-    "roms/BRIX",     "roms/CONNECT4", "roms/GUESS",  "roms/HIDDEN",
-    "roms/INVADERS", "roms/KALEID",   "roms/MAZE",   "roms/MERLIN",
-    "roms/MISSILE",  "roms/PONG",     "roms/PONG2",  "roms/PUZZLE",
-    "roms/SYZYGY",   "roms/TANK",     "roms/TETRIS", "roms/TICTAC",
-    "roms/UFO",      "roms/VBRIX",    "roms/VERS",   "roms/IBM"
+    "WIPEOFF",  "15PUZZLE", "BLINKY", "BLITZ",
+    "BRIX",     "CONNECT4", "GUESS",  "HIDDEN",
+    "INVADERS", "KALEID",   "MAZE",   "MERLIN",
+    "MISSILE",  "PONG",     "PONG2",  "PUZZLE",
+    "SYZYGY",   "TANK",     "TETRIS", "TICTAC",
+    "UFO",      "VBRIX",    "VERS",   "IBM"
 };
 
 static std::unique_ptr<Chip8> LoadKnownROM(std::random_device& rd, std::size_t index)
@@ -482,7 +490,7 @@ static std::unique_ptr<Chip8> LoadKnownROM(std::random_device& rd, std::size_t i
     chip8->boot_up();
 
     const char* const path = kKnownROMs[index % std::size(kKnownROMs)];
-    const bool ok = ReadAllFileAsBinary(path
+    const bool ok = ReadAllFileAsBinary(std::string("assets/roms/") + path
         , {chip8->memory_ + chip8->pc_, (std::size(chip8->memory_) - chip8->pc_)});
     assert(ok);
     return chip8;
@@ -504,21 +512,48 @@ struct TickData
     std::random_device* rd_ = nullptr;
     std::unique_ptr<Chip8> chip8_;
     std::size_t rom_index_ = 0;
+    bool quit_ = false;
+
+    std::uint32_t* pixels_ = nullptr;
+
     // Leak all resources intentionally.
     SDL_Renderer* renderer_ = nullptr;
     SDL_Texture* picture_ = nullptr;
-    std::uint32_t* pixels_ = nullptr;
-    bool quit_ = false;
     SDL_Texture* keyboard_ = nullptr;
+    TTF_Font* font_ = nullptr;
 };
 
-static void RenderKeyboard(SDL_Renderer* renderer, SDL_Texture* texture
+static SDL_Texture* DrawTextToTexture(SDL_Renderer* renderer
+    , TTF_Font* font
+    , const char* text
+    , SDL_Rect& size
+    , SDL_Color color)
+{
+    size = {};
+
+    SDL_Surface* surface = TTF_RenderText_Solid(
+        font, text, color);
+    AbortOnSDLError(surface);
+    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
+    AbortOnSDLError(texture);
+
+    size.w = surface->w;
+    size.h = surface->h;
+    SDL_FreeSurface(surface);
+
+    AbortOnSDLError(SDL_SetRenderTarget(renderer, nullptr/*reset to default*/));
+    return texture;
+}
+
+static void RenderKeyboard(SDL_Renderer* renderer
+    , SDL_Texture* texture
+    , TTF_Font* font
     , const Keyboard& chip8_keys)
 {
-    AbortOnSDLError(SDL_SetRenderTarget(renderer, texture));
-    AbortOnSDLError(SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xff));
-    AbortOnSDLError(SDL_RenderClear(renderer));
+    const SDL_Color color{0xff, 0xff, 0xff, 0xff};
 
+    AbortOnSDLError(SDL_SetRenderTarget(renderer, texture));
+    AbortOnSDLError(SDL_RenderClear(renderer));
     AbortOnSDLError(SDL_SetRenderDrawColor(renderer, 0xff, 0, 0, 0xff));
     constexpr int kYOffset = kRenderHeight - 4 * kRenderKeySize - kRenderLineWidth;
     for (int i = 0; i < (4 + 1); ++i)
@@ -531,7 +566,7 @@ static void RenderKeyboard(SDL_Renderer* renderer, SDL_Texture* texture
             , Sint16(i * kRenderKeySize + (i * kRenderLineWidth) + 1)
             , Sint16(kRenderHeight)
             , Uint8(kRenderLineWidth)
-            , 0xff, 0x0, 0x0, 0xff);
+            , color.r, color.g, color.b, color.a);
 
         thickLineRGBA(renderer
             , Sint16(0)
@@ -539,9 +574,10 @@ static void RenderKeyboard(SDL_Renderer* renderer, SDL_Texture* texture
             , Sint16(kRenderKeysWidth)
             , Sint16(i * kRenderKeySize + kYOffset + 1)
             , Uint8(kRenderLineWidth)
-            , 0xff, 0x0, 0x0, 0xff);
+            , color.r, color.g, color.b, color.a);
     }
 
+    AbortOnSDLError(SDL_SetRenderDrawColor(renderer, 0x50, 0x0a, 0x0a, 0xaa));
     for (std::uint8_t x = 0; x < 4; ++x)
     {
         for (std::uint8_t y = 0; y < 4; ++y)
@@ -558,8 +594,29 @@ static void RenderKeyboard(SDL_Renderer* renderer, SDL_Texture* texture
                 , kRenderKeySize
                 , kRenderKeySize - kRenderLineWidth
             };
-            AbortOnSDLError(SDL_SetRenderDrawColor(renderer, 0xff, 0xff, 0xff, 0xff));
             AbortOnSDLError(SDL_RenderFillRect(renderer, &key_rect));
+        }
+    }
+
+    for (std::uint8_t x = 0; x < 4; ++x)
+    {
+        for (std::uint8_t y = 0; y < 4; ++y)
+        {
+            const std::uint8_t key_id = std::uint8_t(x + y * 4);
+            SDL_Rect rect{};
+            SDL_Texture* text = DrawTextToTexture(renderer, font
+                , kKeymap[key_id].title
+                , rect
+                , color);
+            assert(rect.w <= kRenderKeySize);
+            assert(rect.h <= (kRenderKeySize - kRenderLineWidth));
+            rect.x = x * kRenderKeySize + ((x + 1) * kRenderLineWidth);
+            rect.y = y * kRenderKeySize + kRenderLineWidth + kYOffset;
+            // Center text in a grid.
+            rect.x += ((kRenderKeySize - rect.w) / 2) + 1; // +1 - looks nicer.
+            rect.y += (((kRenderKeySize - kRenderLineWidth) - rect.h) / 2);
+            AbortOnSDLError(SDL_SetRenderTarget(renderer, texture));
+            AbortOnSDLError(SDL_RenderCopy(renderer, text, nullptr, &rect));
         }
     }
 
@@ -585,7 +642,7 @@ static void MainTick(void* data_ptr)
         case SDL_KEYDOWN:
             for (std::size_t i = 0; i < std::size(kKeymap); ++i)
             {
-                if (e.key.keysym.sym == kKeymap[i])
+                if (e.key.keysym.sym == kKeymap[i].code)
                 {
                     chip8->keyboard_.set_pressed(std::uint8_t(i));
                     // Make sure we'll tick CPU.
@@ -597,7 +654,7 @@ static void MainTick(void* data_ptr)
         case SDL_KEYUP:
             for (std::size_t i = 0; i < std::size(kKeymap); ++i)
             {
-                if (e.key.keysym.sym == kKeymap[i])
+                if (e.key.keysym.sym == kKeymap[i].code)
                 {
                     chip8->keyboard_.clear_pressed(std::uint8_t(i));
                     break;
@@ -625,7 +682,7 @@ static void MainTick(void* data_ptr)
         chip8 = data->chip8_.get();
     }
 
-    RenderKeyboard(renderer, data->keyboard_, chip8->keyboard_);
+    RenderKeyboard(renderer, data->keyboard_, data->font_, chip8->keyboard_);
 
     // Our tick is called at 60 Hz frequency
     // most of the time (Vsync is ON).
@@ -708,6 +765,7 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
 #endif
     // Initialize SDL. Ignore any errors and leak resources.
     AbortOnSDLError(SDL_Init(SDL_INIT_VIDEO));
+    AbortOnSDLError(TTF_Init());
 
     SDL_Window* window = SDL_CreateWindow(
         "Chip8 Emulator" // title
@@ -735,11 +793,21 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
         kRenderKeysWidth, kRenderHeight);
     AbortOnSDLError(keyboard);
 
+    TTF_Font* font = TTF_OpenFont("assets/fonts/PlayfairDisplay-VariableFont_wght.ttf", 16/*size*/);
+    AbortOnSDLError(font);
+
     std::uint32_t pixels[kDisplayWidth * kDisplayHeight]{};
     std::random_device rd;
-    auto chip8 = LoadKnownROM(rd, 0);
-    TickData data{&rd, std::move(chip8), 0, renderer, picture, pixels};
+
+    TickData data;
+    data.rd_ = &rd;
+    data.chip8_ = LoadKnownROM(rd, 0/*initial ROM*/);
+    data.renderer_ = renderer;
+    data.picture_ = picture;
+    data.pixels_ = pixels;
     data.keyboard_ = keyboard;
+    data.font_ = font;
+
     MainLoop(data);
 
     return 0;
