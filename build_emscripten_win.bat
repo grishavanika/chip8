@@ -28,7 +28,7 @@ echo Building ...
 
 call emcc chip8.cpp ^
 	-O2 ^
-	-s USE_SDL=2 ^
+	-s USE_SDL=2 -s USE_SDL_GFX=2 -s USE_SDL_TTF=2 ^
 	--embed-file assets ^
 	-DNDEBUG ^
 	-std=c++20 ^
