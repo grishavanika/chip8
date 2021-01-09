@@ -32,6 +32,7 @@ call emcc chip8.cpp ^
 	--embed-file assets ^
 	-DNDEBUG ^
 	-std=c++20 ^
+	-IC:\dev\range-v3\include ^
 	-o chip8_win.js
 
 echo Running...
