@@ -455,7 +455,7 @@ static bool ReadAllFileAsBinary(std::string filepath
     return true;
 }
 
-static void AbortOnSDLError(int code)
+static void CheckSDL(int code)
 {
     if (code != 0)
     {
@@ -464,7 +464,7 @@ static void AbortOnSDLError(int code)
     }
 }
 
-static void AbortOnSDLError(const void* resource)
+static void CheckSDL(const void* resource)
 {
     if (!resource)
     {
@@ -506,6 +506,12 @@ static_assert((16 == std::size(kKeymap))
 static constexpr int kRenderKeySize = 50;
 static constexpr int kRenderLineWidth = 2;
 static constexpr int kRenderKeysWidth = kRenderKeySize * 4 + kRenderLineWidth * (4 + 1);
+static constexpr int kRenderKeysHeight = 4 * kRenderKeySize + kRenderLineWidth;
+static constexpr SDL_Color kKeyboardColor{0xfa, 0xd5, 0xd5, 0xff};
+static constexpr SDL_Color kKeyPressColor{0x9b, 0x47, 0x7f, 0xff};
+
+struct SDLTextureClose { void operator()(SDL_Texture* t) const { SDL_DestroyTexture(t); } };
+using Texture = std::unique_ptr<SDL_Texture, SDLTextureClose>;
 
 struct TickData
 {
@@ -518,66 +524,143 @@ struct TickData
 
     // Leak all resources intentionally.
     SDL_Renderer* renderer_ = nullptr;
-    SDL_Texture* picture_ = nullptr;
-    SDL_Texture* keyboard_ = nullptr;
     TTF_Font* font_ = nullptr;
+
+    Texture picture_;
+    Texture keyboard_;
+    Texture grid_;
+    Texture key_titles_;
+    Texture rom_title_;
+    SDL_Rect rom_title_rect_{};
 };
 
-static SDL_Texture* DrawTextToTexture(SDL_Renderer* renderer
+static Texture DrawTextToTexture(SDL_Renderer* renderer
     , TTF_Font* font
     , const char* text
     , SDL_Rect& size
     , SDL_Color color)
 {
-    size = {};
-
-    SDL_Surface* surface = TTF_RenderText_Solid(
+    SDL_Surface* surface = TTF_RenderUTF8_Blended(
         font, text, color);
-    AbortOnSDLError(surface);
-    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-    AbortOnSDLError(texture);
+    CheckSDL(surface);
+    Texture texture(SDL_CreateTextureFromSurface(renderer, surface));
+    CheckSDL(texture.get());
 
+    size = {};
     size.w = surface->w;
     size.h = surface->h;
     SDL_FreeSurface(surface);
 
-    AbortOnSDLError(SDL_SetRenderTarget(renderer, nullptr/*reset to default*/));
     return texture;
 }
 
-static void RenderKeyboard(SDL_Renderer* renderer
-    , SDL_Texture* texture
-    , TTF_Font* font
-    , const Keyboard& chip8_keys)
+static Texture PrerenderKeyboardGrid(SDL_Renderer* renderer, SDL_Color color)
 {
-    const SDL_Color color{0xff, 0xff, 0xff, 0xff};
+    Texture grid(SDL_CreateTexture(renderer,
+        SDL_PIXELFORMAT_ARGB8888,
+        SDL_TEXTUREACCESS_TARGET,
+        kRenderKeysWidth, kRenderKeysHeight));
+    CheckSDL(grid.get());
 
-    AbortOnSDLError(SDL_SetRenderTarget(renderer, texture));
-    AbortOnSDLError(SDL_RenderClear(renderer));
-    AbortOnSDLError(SDL_SetRenderDrawColor(renderer, 0xff, 0, 0, 0xff));
-    constexpr int kYOffset = kRenderHeight - 4 * kRenderKeySize - kRenderLineWidth;
+    CheckSDL(SDL_SetRenderTarget(renderer, grid.get()));
+    CheckSDL(SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xff));
+    CheckSDL(SDL_RenderClear(renderer));
+    CheckSDL(SDL_SetRenderDrawColor(renderer, 0xff, 0, 0, 0xff));
+
+    // 4 keys per line (4 columns) = 5 vertical lines/separator.
     for (int i = 0; i < (4 + 1); ++i)
     {
         // + 1 pixel because it seems SDL is off by one when
         // doing SDL_RenderCopy().
         thickLineRGBA(renderer
             , Sint16(i * kRenderKeySize + (i * kRenderLineWidth) + 1)
-            , Sint16(kYOffset)
+            , Sint16(0)
             , Sint16(i * kRenderKeySize + (i * kRenderLineWidth) + 1)
-            , Sint16(kRenderHeight)
+            , Sint16(kRenderKeysHeight)
             , Uint8(kRenderLineWidth)
             , color.r, color.g, color.b, color.a);
 
         thickLineRGBA(renderer
             , Sint16(0)
-            , Sint16(i * kRenderKeySize + kYOffset + 1)
+            , Sint16(i * kRenderKeySize + 1)
             , Sint16(kRenderKeysWidth)
-            , Sint16(i * kRenderKeySize + kYOffset + 1)
+            , Sint16(i * kRenderKeySize + 1)
             , Uint8(kRenderLineWidth)
             , color.r, color.g, color.b, color.a);
     }
 
-    AbortOnSDLError(SDL_SetRenderDrawColor(renderer, 0x50, 0x0a, 0x0a, 0xaa));
+    CheckSDL(SDL_SetRenderTarget(renderer, nullptr/*reset to default*/));
+
+    return grid;
+}
+
+static Texture PrerenderKeyTitles(SDL_Renderer* renderer
+    , TTF_Font* font, SDL_Color color)
+{
+    Texture texture(SDL_CreateTexture(renderer,
+        SDL_PIXELFORMAT_ARGB8888,
+        SDL_TEXTUREACCESS_TARGET,
+        kRenderKeysWidth, kRenderKeysHeight));
+    CheckSDL(texture.get());
+
+    // BLEND with render clear Alpha = 0 is important there
+    // so titles are properly mixed with other layers.
+    CheckSDL(SDL_SetTextureBlendMode(texture.get(), SDL_BLENDMODE_BLEND));
+    CheckSDL(SDL_SetRenderTarget(renderer, texture.get()));
+    CheckSDL(SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0));
+    CheckSDL(SDL_RenderClear(renderer));
+
+    for (std::uint8_t x = 0; x < 4; ++x)
+    {
+        for (std::uint8_t y = 0; y < 4; ++y)
+        {
+            const std::uint8_t key_id = std::uint8_t(x + y * 4);
+            SDL_Rect rect{};
+            Texture text = DrawTextToTexture(renderer, font
+                , kKeymap[key_id].title, rect, color);
+            assert(rect.w <= kRenderKeySize);
+            assert(rect.h <= (kRenderKeySize - kRenderLineWidth));
+            rect.x = x * kRenderKeySize + ((x + 1) * kRenderLineWidth);
+            rect.y = y * kRenderKeySize + kRenderLineWidth;
+            // Center text in a grid.
+            rect.x += ((kRenderKeySize - rect.w) / 2);
+            rect.y += (((kRenderKeySize - kRenderLineWidth) - rect.h) / 2);
+            CheckSDL(SDL_RenderCopy(renderer, text.get(), nullptr, &rect));
+        }
+    }
+
+    return texture;
+}
+
+static void RenderKeyboard(SDL_Renderer* renderer
+    , Texture& texture
+    , Texture& grid
+    , Texture& titles
+    , const Keyboard& chip8_keys)
+{
+    CheckSDL(SDL_SetRenderTarget(renderer, texture.get()));
+    CheckSDL(SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xff));
+    CheckSDL(SDL_RenderClear(renderer));
+    CheckSDL(SDL_SetRenderDrawColor(renderer, 0xff, 0, 0, 0xff));
+
+    const SDL_Rect keyboard{0, kRenderHeight - kRenderKeysHeight, kRenderKeysWidth, kRenderKeysHeight};
+
+    if (chip8_keys.keys_ == 0)
+    {
+        // No pressed keys. Just grid + titles.
+        CheckSDL(SDL_RenderCopy(renderer, grid.get(), nullptr, &keyboard));
+        CheckSDL(SDL_RenderCopy(renderer, titles.get(), nullptr, &keyboard));
+        CheckSDL(SDL_SetRenderTarget(renderer, nullptr/*reset to default*/));
+        return;
+    }
+
+    // Grid + "pressed keys" (dynamic) + titles.
+    CheckSDL(SDL_RenderCopy(renderer, grid.get(), nullptr, &keyboard));
+
+    CheckSDL(SDL_SetRenderDrawColor(renderer
+        , kKeyPressColor.r, kKeyPressColor.g, kKeyPressColor.b, kKeyPressColor.a));
+    SDL_Rect pressed_keys[16]{};
+    int count = 0;
     for (std::uint8_t x = 0; x < 4; ++x)
     {
         for (std::uint8_t y = 0; y < 4; ++y)
@@ -587,41 +670,21 @@ static void RenderKeyboard(SDL_Renderer* renderer
             {
                 continue;
             }
-            const SDL_Rect key_rect =
+            const SDL_Rect key =
             {
                   x * kRenderKeySize + ((x + 1) * kRenderLineWidth)
-                , y * kRenderKeySize + kRenderLineWidth + kYOffset
+                , y * kRenderKeySize + kRenderLineWidth + kRenderHeight - kRenderKeysHeight
                 , kRenderKeySize
                 , kRenderKeySize - kRenderLineWidth
             };
-            AbortOnSDLError(SDL_RenderFillRect(renderer, &key_rect));
+            pressed_keys[count++] = key;
         }
     }
 
-    for (std::uint8_t x = 0; x < 4; ++x)
-    {
-        for (std::uint8_t y = 0; y < 4; ++y)
-        {
-            const std::uint8_t key_id = std::uint8_t(x + y * 4);
-            SDL_Rect rect{};
-            SDL_Texture* text = DrawTextToTexture(renderer, font
-                , kKeymap[key_id].title
-                , rect
-                , color);
-            assert(rect.w <= kRenderKeySize);
-            assert(rect.h <= (kRenderKeySize - kRenderLineWidth));
-            rect.x = x * kRenderKeySize + ((x + 1) * kRenderLineWidth);
-            rect.y = y * kRenderKeySize + kRenderLineWidth + kYOffset;
-            // Center text in a grid.
-            rect.x += ((kRenderKeySize - rect.w) / 2) + 1; // +1 - looks nicer.
-            rect.y += (((kRenderKeySize - kRenderLineWidth) - rect.h) / 2);
-            AbortOnSDLError(SDL_SetRenderTarget(renderer, texture));
-            AbortOnSDLError(SDL_RenderCopy(renderer, text, nullptr, &rect));
-            SDL_DestroyTexture(text);
-        }
-    }
-
-    AbortOnSDLError(SDL_SetRenderTarget(renderer, nullptr/*reset to default*/));
+    assert(count > 0);
+    CheckSDL(SDL_RenderFillRects(renderer, pressed_keys, count));
+    CheckSDL(SDL_RenderCopy(renderer, titles.get(), nullptr, &keyboard));
+    CheckSDL(SDL_SetRenderTarget(renderer, nullptr/*reset to default*/));
 }
 
 static void MainTick(void* data_ptr)
@@ -680,10 +743,15 @@ static void MainTick(void* data_ptr)
     if (old_rom_index != data->rom_index_)
     {
         data->chip8_ = LoadKnownROM(*data->rd_, data->rom_index_);
+        data->rom_title_ = nullptr; // To b rendered later.
         chip8 = data->chip8_.get();
     }
 
-    RenderKeyboard(renderer, data->keyboard_, data->font_, chip8->keyboard_);
+    RenderKeyboard(renderer
+        , data->keyboard_
+        , data->grid_
+        , data->key_titles_
+        , chip8->keyboard_);
 
     // Our tick is called at 60 Hz frequency
     // most of the time (Vsync is ON).
@@ -714,22 +782,34 @@ static void MainTick(void* data_ptr)
             }
         }
 
-        AbortOnSDLError(SDL_UpdateTexture(data->picture_
+        CheckSDL(SDL_UpdateTexture(data->picture_.get()
             , nullptr
             , data->pixels_
             , kDisplayWidth * sizeof(std::uint32_t)));
     }
 
-    AbortOnSDLError(SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xff));
-    AbortOnSDLError(SDL_RenderClear(renderer));
+    if (!data->rom_title_)
+    {
+        data->rom_title_ = DrawTextToTexture(renderer, data->font_
+            , kKnownROMs[data->rom_index_ % std::size(kKnownROMs)]
+            , data->rom_title_rect_, kKeyboardColor);
+    }
+
+    CheckSDL(SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xff));
+    CheckSDL(SDL_RenderClear(renderer));
     {
         SDL_Rect dest{0, 0, kRenderWidth, kRenderHeight};
-        AbortOnSDLError(SDL_RenderCopy(renderer, data->picture_, nullptr, &dest));
+        CheckSDL(SDL_RenderCopy(renderer, data->picture_.get(), nullptr, &dest));
     }
     {
         SDL_Rect dest{kRenderWidth, 0, kRenderKeysWidth, kRenderHeight};
-        AbortOnSDLError(SDL_RenderCopy(renderer, data->keyboard_, nullptr, &dest));
+        CheckSDL(SDL_RenderCopy(renderer, data->keyboard_.get(), nullptr, &dest));
     }
+    {
+        SDL_Rect dest{kRenderWidth, 0, data->rom_title_rect_.w, data->rom_title_rect_.h};
+        CheckSDL(SDL_RenderCopy(renderer, data->rom_title_.get(), nullptr, &dest));
+    }
+
     SDL_RenderPresent(renderer);
 }
 
@@ -765,8 +845,8 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
     SDL_SetMainReady();
 #endif
     // Initialize SDL. Ignore any errors and leak resources.
-    AbortOnSDLError(SDL_Init(SDL_INIT_VIDEO));
-    AbortOnSDLError(TTF_Init());
+    CheckSDL(SDL_Init(SDL_INIT_VIDEO));
+    CheckSDL(TTF_Init());
 
     SDL_Window* window = SDL_CreateWindow(
         "Chip8 Emulator" // title
@@ -775,27 +855,27 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
         , kRenderWidth + kRenderKeysWidth
         , kRenderHeight
         , SDL_WINDOW_SHOWN | SDL_WINDOW_BORDERLESS);
-    AbortOnSDLError(window);
+    CheckSDL(window);
     SDL_Renderer* renderer = SDL_CreateRenderer(
         window
         , -1 // first supporting renderer
         , SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    AbortOnSDLError(renderer);
+    CheckSDL(renderer);
 
-    SDL_Texture* picture = SDL_CreateTexture(renderer,
+    Texture picture(SDL_CreateTexture(renderer,
         SDL_PIXELFORMAT_ARGB8888,
         SDL_TEXTUREACCESS_STREAMING,
-        kDisplayWidth, kDisplayHeight);
-    AbortOnSDLError(picture);
+        kDisplayWidth, kDisplayHeight));
+    CheckSDL(picture.get());
 
-    SDL_Texture* keyboard = SDL_CreateTexture(renderer,
+    Texture keyboard(SDL_CreateTexture(renderer,
         SDL_PIXELFORMAT_ARGB8888,
         SDL_TEXTUREACCESS_TARGET,
-        kRenderKeysWidth, kRenderHeight);
-    AbortOnSDLError(keyboard);
+        kRenderKeysWidth, kRenderHeight));
+    CheckSDL(keyboard.get());
 
-    TTF_Font* font = TTF_OpenFont("assets/fonts/PlayfairDisplay-VariableFont_wght.ttf", 16/*size*/);
-    AbortOnSDLError(font);
+    TTF_Font* font = TTF_OpenFont("assets/fonts/PlayfairDisplay-Bold.ttf", 20/*size*/);
+    CheckSDL(font);
 
     std::uint32_t pixels[kDisplayWidth * kDisplayHeight]{};
     std::random_device rd;
@@ -804,9 +884,12 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
     data.rd_ = &rd;
     data.chip8_ = LoadKnownROM(rd, 0/*initial ROM*/);
     data.renderer_ = renderer;
-    data.picture_ = picture;
     data.pixels_ = pixels;
-    data.keyboard_ = keyboard;
+    data.rom_title_ = nullptr;
+    data.picture_ = std::move(picture);
+    data.keyboard_ = std::move(keyboard);
+    data.grid_ = PrerenderKeyboardGrid(renderer, kKeyboardColor);
+    data.key_titles_ = PrerenderKeyTitles(renderer, font, kKeyboardColor);
     data.font_ = font;
 
     MainLoop(data);
