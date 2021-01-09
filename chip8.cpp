@@ -729,26 +729,30 @@ static void MainTick(void* data_ptr)
             data->quit_ = true;
             break;
         case SDL_KEYDOWN:
-            for (std::size_t i = 0; i < std::size(kKeymap); ++i)
+        {
+            auto it = ranges::find(kKeymap, e.key.keysym.sym, &KeyInfo::code);
+            ranges::for_each(rv::single(it)
+                | rv::transform([](auto i) { return std::uint8_t(std::distance(std::begin(kKeymap), i)); })
+                | rv::filter([](std::uint8_t index) { return index < std::size(kKeymap); })
+                , [&](std::uint8_t index)
             {
-                if (e.key.keysym.sym == kKeymap[i].code)
-                {
-                    chip8->keyboard_.set_pressed(std::uint8_t(i));
-                    // Make sure we'll tick CPU.
-                    chip8->waits_keyboard_ = false;
-                    break;
-                }
-            }
+                chip8->keyboard_.set_pressed(index);
+                // Make sure we'll tick CPU.
+                chip8->waits_keyboard_ = false;
+            });
             break;
+        }
         case SDL_KEYUP:
-            for (std::size_t i = 0; i < std::size(kKeymap); ++i)
+        {
+            auto it = ranges::find(kKeymap, e.key.keysym.sym, &KeyInfo::code);
+            ranges::for_each(rv::single(it)
+                | rv::transform([](auto i) { return std::uint8_t(std::distance(std::begin(kKeymap), i)); })
+                | rv::filter([](std::uint8_t index) { return index < std::size(kKeymap); })
+                , [&](std::uint8_t index)
             {
-                if (e.key.keysym.sym == kKeymap[i].code)
-                {
-                    chip8->keyboard_.clear_pressed(std::uint8_t(i));
-                    break;
-                }
-            }
+                chip8->keyboard_.clear_pressed(index);
+            });
+
             if (e.key.keysym.sym == SDLK_ESCAPE)
             {
                 data->quit_ = true;
@@ -762,6 +766,7 @@ static void MainTick(void* data_ptr)
                 --data->rom_index_;
             }
             break;
+        }
         }
     }
 
