@@ -15,6 +15,33 @@
 namespace rv = ranges::views;
 namespace ra = ranges::actions;
 
+
+// From Casey: https://stackoverflow.com/a/54486302/2451677, simplified version.
+// Decompose single-tuple parameter into N separate parameters:
+//     auto chars = view::zip(r1, r2)
+//         | view::transform(decomposed([](int, char x) { return x; }));
+template<class F>
+struct decomposed_fn
+{
+    F f_;
+
+    template<class T>
+    decltype(auto) operator()(T&& t)
+    {
+        auto invoke = [&](auto&&... args)
+        {
+            return std::invoke(f_, std::forward<decltype(args)>(args)...);
+        };
+        return std::apply(invoke, std::forward<T>(t));
+    }
+};
+
+template<class F>
+auto decomposed(F&& f)
+{
+    return decomposed_fn<std::decay_t<F>>{std::forward<F>(f)};
+}
+
 struct KeyInfo
 {
     const int code;
@@ -238,11 +265,8 @@ static Texture PrerenderKeyTitles(SDL_Renderer* renderer
 
     const auto indexes = rv::iota(std::uint8_t(0), std::uint8_t(4));
     auto pipeline = rv::cartesian_product(indexes, indexes)
-        // #ranges: is there curry analog ? Maybe transform_curry()/tansform_unzip()
-        // to take a tuple and make apply() on it ?
-        | rv::transform([&](std::tuple<std::uint8_t, std::uint8_t> xy)
+        | rv::transform(decomposed([&](std::uint8_t x, std::uint8_t y)
     {
-        auto [x, y] = xy;
         const std::uint8_t key_id = std::uint8_t(x + y * 4);
         SDL_Rect size{};
         Texture text = DrawTextToTexture(renderer
@@ -258,14 +282,14 @@ static Texture PrerenderKeyTitles(SDL_Renderer* renderer
         position.x += ((kRenderKeySize - size.w) / 2);
         position.y += ((kRenderKeySize - size.h) / 2);
         return std::make_tuple(std::move(text), position);
-    });
+    }));
 
-    ranges::for_each(pipeline | rv::move, [&](auto&& data)
+    ranges::for_each(pipeline | rv::move
+        , decomposed([&](auto&& text, auto&& position)
     {
-        auto&& [text, position] = data;
         CheckSDL(SDL_RenderCopy(renderer
             , text.get(), nullptr, &position));
-    });
+    }));
 
     return texture;
 }
@@ -300,24 +324,21 @@ static void RenderKeyboard(SDL_Renderer* renderer
 
     const auto indexes = rv::iota(std::uint8_t(0), std::uint8_t(4));
     auto pipeline = rv::cartesian_product(indexes, indexes)
-        | rv::filter([&](std::tuple<std::uint8_t, std::uint8_t> xy)
+        | rv::filter(decomposed([&](std::uint8_t x, std::uint8_t y)
     {
-        auto [x, y] = xy;
         const std::uint8_t key_id = std::uint8_t(x + y * 4);
         return chip8_keys.is_pressed(key_id);
-    })
-        | rv::transform([&](std::tuple<std::uint8_t, std::uint8_t> xy)
+    }))
+        | rv::transform(decomposed([&](std::uint8_t x, std::uint8_t y)
     {
-        auto [x, y] = xy;
-        const SDL_Rect rect =
+        return SDL_Rect
         {
               x * kRenderKeySize + ((x + 1) * kRenderLineWidth)
             , y * kRenderKeySize + kRenderLineWidth + kRenderHeight - kRenderKeysHeight
             , kRenderKeySize
             , kRenderKeySize - kRenderLineWidth
         };
-        return rect;
-    });
+    }));
 
     SDL_Rect pressed_keys[16]{};
     auto [in, out] = ranges::copy(pipeline, pressed_keys);
@@ -420,12 +441,11 @@ static void MainTick(void* data_ptr)
         auto pipeline = rv::cartesian_product(
               rv::iota(0, int(kDisplayHeight))
             , rv::iota(0, int(kDisplayWidth)))
-            | rv::transform([&](std::tuple<int, int> cr)
+            | rv::transform(decomposed([&](int c, int r)
         {
-            auto [c, r] = cr;
             const std::uint8_t on = chip8->display_memory_[r][c];
             return std::uint32_t(on ? 0xff33ff66u : 0xff000000u);
-        });
+        }));
         ranges::copy(pipeline, data->pixels_);
 
         CheckSDL(SDL_UpdateTexture(data->picture_.get()
