@@ -621,8 +621,7 @@ static Texture PrerenderKeyTitles(SDL_Renderer* renderer
         // to take a tuple and make apply() on it ?
         | rv::transform([&](std::tuple<std::uint8_t, std::uint8_t> xy)
     {
-        const std::uint8_t x = std::get<0>(xy);
-        const std::uint8_t y = std::get<1>(xy);
+        auto [x, y] = xy;
         const std::uint8_t key_id = std::uint8_t(x + y * 4);
         SDL_Rect size{};
         Texture text = DrawTextToTexture(renderer
@@ -642,10 +641,9 @@ static Texture PrerenderKeyTitles(SDL_Renderer* renderer
 
     ranges::for_each(pipeline | rv::move, [&](auto&& data)
     {
+        auto&& [text, position] = data;
         CheckSDL(SDL_RenderCopy(renderer
-            , std::get<0>(data).get()
-            , nullptr
-            , &std::get<1>(data)));
+            , text.get(), nullptr, &position));
     });
 
     return texture;
@@ -683,15 +681,13 @@ static void RenderKeyboard(SDL_Renderer* renderer
     auto pipeline = rv::cartesian_product(indexes, indexes)
         | rv::filter([&](std::tuple<std::uint8_t, std::uint8_t> xy)
     {
-        const std::uint8_t x = std::get<0>(xy);
-        const std::uint8_t y = std::get<1>(xy);
+        auto [x, y] = xy;
         const std::uint8_t key_id = std::uint8_t(x + y * 4);
         return chip8_keys.is_pressed(key_id);
     })
         | rv::transform([&](std::tuple<std::uint8_t, std::uint8_t> xy)
     {
-        const std::uint8_t x = std::get<0>(xy);
-        const std::uint8_t y = std::get<1>(xy);
+        auto [x, y] = xy;
         const SDL_Rect rect =
         {
               x * kRenderKeySize + ((x + 1) * kRenderLineWidth)
@@ -773,7 +769,7 @@ static void MainTick(void* data_ptr)
     if (old_rom_index != data->rom_index_)
     {
         data->chip8_ = LoadKnownROM(*data->rd_, data->rom_index_);
-        data->rom_title_ = nullptr; // To b rendered later.
+        data->rom_title_ = nullptr; // To be rendered later.
         chip8 = data->chip8_.get();
     }
 
@@ -801,20 +797,15 @@ static void MainTick(void* data_ptr)
     if (std::exchange(chip8->needs_redraw_, false))
     {
         auto pipeline = rv::cartesian_product(
-              rv::iota(0, int(kDisplayWidth))
-            , rv::iota(0, int(kDisplayHeight)))
-            | rv::transform([&](std::tuple<int, int> rc)
+              rv::iota(0, int(kDisplayHeight))
+            , rv::iota(0, int(kDisplayWidth)))
+            | rv::transform([&](std::tuple<int, int> cr)
         {
-            const int r = std::get<0>(rc);
-            const int c = std::get<1>(rc);
+            auto [c, r] = cr;
             const std::uint8_t on = chip8->display_memory_[r][c];
-            const auto index = unsigned(r + c * kDisplayWidth);
-            return std::make_tuple(index, std::uint32_t(on ? 0xff33ff66 : 0xff000000));
+            return std::uint32_t(on ? 0xff33ff66u : 0xff000000u);
         });
-        ranges::for_each(pipeline, [&](std::tuple<unsigned, std::uint32_t> e)
-        {
-            data->pixels_[std::get<0>(e)] = std::get<1>(e);
-        });
+        ranges::copy(pipeline, data->pixels_);
 
         CheckSDL(SDL_UpdateTexture(data->picture_.get()
             , nullptr
