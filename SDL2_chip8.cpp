@@ -136,10 +136,10 @@ static const char* kKnownROMs[] =
     "UFO",      "VBRIX",    "VERS",   "IBM"
 };
 
-static std::unique_ptr<Chip8> LoadKnownROM(std::random_device& rd, std::size_t index)
+static std::unique_ptr<Chip8> LoadKnownROM(std::default_random_engine& random, std::size_t index)
 {
     std::unique_ptr<Chip8> chip8(new Chip8{});
-    chip8->rd_ = &rd;
+    chip8->random_ = &random;
     chip8->boot_up();
 
     const char* const path = kKnownROMs[index % std::size(kKnownROMs)];
@@ -168,21 +168,21 @@ using Texture = std::unique_ptr<SDL_Texture, SDLTextureClose>;
 
 struct TickData
 {
-    std::random_device* rd_ = nullptr;
+    std::default_random_engine* random_ = nullptr;
     std::unique_ptr<Chip8> chip8_;
     std::size_t rom_index_ = 0;
     bool quit_ = false;
 
-    std::uint32_t* pixels_ = nullptr;
+    std::uint32_t* chip8_pixels_ = nullptr;
 
     // Leak all resources intentionally.
     SDL_Renderer* renderer_ = nullptr;
     TTF_Font* font_ = nullptr;
 
-    Texture picture_;
+    Texture chip8_display_;
     Texture keyboard_;
-    Texture grid_;
-    Texture key_titles_;
+    Texture keys_grid_;
+    Texture keys_titles_;
     Texture rom_title_;
     SDL_Rect rom_title_rect_{};
 };
@@ -199,11 +199,8 @@ static Texture DrawTextToTexture(SDL_Renderer* renderer
     Texture texture(SDL_CreateTextureFromSurface(renderer, surface));
     CheckSDL(texture.get());
 
-    size = {};
-    size.w = surface->w;
-    size.h = surface->h;
+    size = {0, 0, surface->w, surface->h};
     SDL_FreeSurface(surface);
-
     return texture;
 }
 
@@ -270,10 +267,7 @@ static Texture PrerenderKeyTitles(SDL_Renderer* renderer
         const std::uint8_t key_id = std::uint8_t(x + y * 4);
         SDL_Rect size{};
         Texture text = DrawTextToTexture(renderer
-            , font
-            , kKeymap[key_id].title
-            , size
-            , color);
+            , font, kKeymap[key_id].title, size, color);
         SDL_Rect position = size;
         position.x = x * kRenderKeySize + ((x + 1) * kRenderLineWidth);
         position.y = y * kRenderKeySize + kRenderLineWidth;
@@ -410,15 +404,15 @@ static void MainTick(void* data_ptr)
 
     if (old_rom_index != data->rom_index_)
     {
-        data->chip8_ = LoadKnownROM(*data->rd_, data->rom_index_);
+        data->chip8_ = LoadKnownROM(*data->random_, data->rom_index_);
         data->rom_title_ = nullptr; // To be rendered later.
         chip8 = data->chip8_.get();
     }
 
     RenderKeyboard(renderer
         , data->keyboard_
-        , data->grid_
-        , data->key_titles_
+        , data->keys_grid_
+        , data->keys_titles_
         , chip8->keyboard_);
 
     // Our tick is called at 60 Hz frequency
@@ -446,11 +440,11 @@ static void MainTick(void* data_ptr)
             const std::uint8_t on = chip8->display_memory_[r][c];
             return std::uint32_t(on ? 0xff33ff66u : 0xff000000u);
         }));
-        ranges::copy(pipeline, data->pixels_);
+        ranges::copy(pipeline, data->chip8_pixels_);
 
-        CheckSDL(SDL_UpdateTexture(data->picture_.get()
+        CheckSDL(SDL_UpdateTexture(data->chip8_display_.get()
             , nullptr
-            , data->pixels_
+            , data->chip8_pixels_
             , kDisplayWidth * sizeof(std::uint32_t)));
     }
 
@@ -463,18 +457,16 @@ static void MainTick(void* data_ptr)
 
     CheckSDL(SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xff));
     CheckSDL(SDL_RenderClear(renderer));
-    {
-        SDL_Rect dest{0, 0, kRenderWidth, kRenderHeight};
-        CheckSDL(SDL_RenderCopy(renderer, data->picture_.get(), nullptr, &dest));
-    }
-    {
-        SDL_Rect dest{kRenderWidth, 0, kRenderKeysWidth, kRenderHeight};
-        CheckSDL(SDL_RenderCopy(renderer, data->keyboard_.get(), nullptr, &dest));
-    }
-    {
-        SDL_Rect dest{kRenderWidth, 0, data->rom_title_rect_.w, data->rom_title_rect_.h};
-        CheckSDL(SDL_RenderCopy(renderer, data->rom_title_.get(), nullptr, &dest));
-    }
+
+    // CHIP-8.
+    SDL_Rect dest{0, 0, kRenderWidth, kRenderHeight};
+    CheckSDL(SDL_RenderCopy(renderer, data->chip8_display_.get(), nullptr, &dest));
+    // Keyboard (with pressed keys) state.
+    dest = {kRenderWidth, 0, kRenderKeysWidth, kRenderHeight};
+    CheckSDL(SDL_RenderCopy(renderer, data->keyboard_.get(), nullptr, &dest));
+    // Title of the running ROM.
+    dest = {kRenderWidth, 0, data->rom_title_rect_.w, data->rom_title_rect_.h};
+    CheckSDL(SDL_RenderCopy(renderer, data->rom_title_.get(), nullptr, &dest));
 
     SDL_RenderPresent(renderer);
 }
@@ -528,11 +520,11 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
         , SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     CheckSDL(renderer);
 
-    Texture picture(SDL_CreateTexture(renderer,
+    Texture chip8_display(SDL_CreateTexture(renderer,
         SDL_PIXELFORMAT_ARGB8888,
         SDL_TEXTUREACCESS_STREAMING,
         kDisplayWidth, kDisplayHeight));
-    CheckSDL(picture.get());
+    CheckSDL(chip8_display.get());
 
     Texture keyboard(SDL_CreateTexture(renderer,
         SDL_PIXELFORMAT_ARGB8888,
@@ -543,19 +535,23 @@ int WINAPI _tWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPTSTR, _In_ int)
     TTF_Font* font = TTF_OpenFont("assets/fonts/PlayfairDisplay-Bold.ttf", 20/*size*/);
     CheckSDL(font);
 
-    std::uint32_t pixels[kDisplayWidth * kDisplayHeight]{};
+    std::uint32_t chip8_pixels[kDisplayWidth * kDisplayHeight]{};
+
     std::random_device rd;
+    std::seed_seq seed{rd(), rd(), rd(), rd(), rd(), rd(), rd(), rd()};
+    std::default_random_engine random{seed};
 
     TickData data;
-    data.rd_ = &rd;
-    data.chip8_ = LoadKnownROM(rd, 0/*initial ROM*/);
+    data.random_ = &random;
+    data.rom_index_ = 0;
+    data.chip8_ = LoadKnownROM(random, data.rom_index_);
     data.renderer_ = renderer;
-    data.pixels_ = pixels;
-    data.rom_title_ = nullptr;
-    data.picture_ = std::move(picture);
+    data.chip8_pixels_ = chip8_pixels;
+    data.rom_title_ = nullptr; // To be set later.
+    data.chip8_display_ = std::move(chip8_display);
     data.keyboard_ = std::move(keyboard);
-    data.grid_ = PrerenderKeyboardGrid(renderer, kKeyboardColor);
-    data.key_titles_ = PrerenderKeyTitles(renderer, font, kKeyboardColor);
+    data.keys_grid_ = PrerenderKeyboardGrid(renderer, kKeyboardColor);
+    data.keys_titles_ = PrerenderKeyTitles(renderer, font, kKeyboardColor);
     data.font_ = font;
 
     MainLoop(data);

@@ -42,7 +42,7 @@ struct Chip8
     std::uint8_t sound_timer_{0};  // Only one tone.
     std::uint8_t display_memory_[kDisplayWidth][kDisplayHeight]{};
 
-    std::random_device* rd_{nullptr};
+    std::default_random_engine* random_{nullptr};
     bool needs_redraw_{false};         // For "optimizations".
     bool waits_keyboard_{false};
     std::chrono::high_resolution_clock::time_point last_tick_{};
@@ -87,7 +87,7 @@ static std::uint8_t overflow_add(std::uint8_t lhs, std::uint8_t rhs
     , std::uint8_t& carry);
 static std::uint8_t overflow_sub(std::uint8_t lhs, std::uint8_t rhs
     , std::uint8_t& borrow);
-static std::uint8_t random_byte(std::random_device& rd);
+static std::uint8_t random_byte(std::default_random_engine& random);
 
 void Chip8::execute_cycle()
 {
@@ -188,7 +188,7 @@ void Chip8::execute_opcode(std::uint16_t opcode)
             cpu.pc_ = std::uint16_t(nnn + cpu.V_[0]); })
         , code(0xC, _x, _k, _k, [](Chip8& cpu, std::uint8_t x, std::uint8_t kk)
         { /* RND Vx, byte. */
-            cpu.V_[x] = random_byte(*cpu.rd_) & kk; })
+            cpu.V_[x] = random_byte(*cpu.random_) & kk; })
         , code(0xD, _x, _y, _n, [](Chip8& cpu, std::uint8_t x, std::uint8_t y, std::uint8_t n)
         { /* DRW Vx, Vy, nibble. */
             const bool off = cpu.draw(cpu.V_[x], cpu.V_[y]
@@ -367,9 +367,8 @@ static std::uint8_t overflow_sub(std::uint8_t lhs, std::uint8_t rhs
     return std::uint8_t(lhs - rhs);
 }
 
-static std::uint8_t random_byte(std::random_device& rd)
+static std::uint8_t random_byte(std::default_random_engine& random)
 {
-    std::mt19937 gen(rd());
     std::uniform_int_distribution<> dist(0, int(std::uint8_t(-1)));
-    return std::uint8_t(dist(gen));
+    return std::uint8_t(dist(random));
 }
